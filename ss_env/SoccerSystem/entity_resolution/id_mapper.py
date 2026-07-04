@@ -195,6 +195,7 @@ class EntityResolver:
         source_id: str,
         name: str,
         date_of_birth: Optional[date] = None,
+        team_canonical_id: Optional[str] = None,
     ) -> ResolutionResult:
         existing = self.store.resolve_canonical_id("player", source, source_id)
         if existing:

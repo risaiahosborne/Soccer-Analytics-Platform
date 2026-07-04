@@ -200,6 +200,11 @@ class DuckDBStore:
         self.conn = duckdb.connect(str(self.db_path))
         self._init_schema()
 
+    @property
+    def con(self):
+        """Backward-compatible alias for the DuckDB connection object."""
+        return self.conn
+
     def _init_schema(self) -> None:
         self.conn.execute(DDL_STATEMENTS)
 

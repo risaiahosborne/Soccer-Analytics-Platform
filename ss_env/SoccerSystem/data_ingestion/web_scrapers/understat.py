@@ -1,226 +1,334 @@
 """
-Understat xG scraper.
+Understat xG ingestor.
 
-Understat has no public API; xG data is embedded as JSON inside a
-<script> tag on each league/season page, JS-escaped. This scraper
-extracts and decodes that blob rather than parsing HTML tables — this
-is the standard, widely-documented approach the soccer-analytics
-community uses for this site (no auth bypass, no rate-limit evasion;
-it's a plain GET against publicly served pages).
+Calls the undocumented but stable Understat league data endpoint:
+    https://understat.com/getLeagueData/{league}/{season_start_year}
 
-URL pattern: https://understat.com/league/{LeagueCode}/{season_start_year}
-e.g. https://understat.com/league/EPL/2025  (the 2025/26 season)
+Response structure:
+    {
+      "<team_id>": {
+        "id": "89",
+        "title": "Manchester United",
+        "history": [
+          {
+            "h_a": "h",           # "h" = home, "a" = away
+            "xG": 1.37653,
+            "xGA": 1.3304,
+            "npxG": 1.37653,
+            "npxGA": 1.3304,
+            "ppda": {"att": 166, "def": 21},
+            "ppda_allowed": {"att": 259, "def": 23},
+            "date": "2025-08-17 15:30:00",
+            "deep": 7,
+            "deep_allowed": 3,
+            "scored": 0,
+            "missed": 1,
+            "result": "l",
+            "wins": 0,
+            "draws": 0,
+            "loses": 1,
+            "pts": 0,
+            "npxGD": 0.04613,
+            "xpts": 1.3298
+          },
+          ...
+        ]
+      },
+      ...
+    }
 
-This pulls "datesData" — the full match list for that league/season,
-including each match's home/away team names, goals, and xG. It does
-NOT include shots/npxG/possession (those live in a separate blob,
-teamsData, keyed per-team rather than per-match-pair) — left as a
-future enhancement; XGRecord.shots/npxg/possession_pct will be None
-for now.
+Each history entry is one match for that team.  The same match appears
+twice in the full payload (once for each side), so we emit two XGRecord
+rows per match — one per team — which is exactly what the schema intends.
 
-CROSS-SOURCE MATCH LINKING: Understat has its own internal match IDs,
-unrelated to football-data.org's. To avoid creating duplicate "shadow"
-matches, this ingestor first tries to find an *existing* canonical
-match (e.g. one already ingested from football-data.org) by matching
-home/away team canonical_ids plus a close kickoff datetime (a wide
-36-hour window, since Understat's timestamps may not be in UTC and the
-exact offset isn't well-documented). Only if no existing match is
-found does it mint a new Understat-rooted canonical match id.
-
-For best linking results: ingest matches (football-data.org) BEFORE
-xG (Understat) for the same fixtures.
-
-Dependencies: pip install requests beautifulsoup4 lxml
+Linking to canonical matches:
+    We look up the canonical match by team name + date (±12 h window) using
+    the same approach as the_odds_api.py.  Matches for the requested
+    league/season must already be ingested via football_data_org.py before
+    running this ingestor.
 """
 
 from __future__ import annotations
 
-import json
 import logging
-from datetime import datetime
-from typing import Any, Optional
+import time
+from datetime import datetime, timedelta, timezone
+from typing import Any
 
 import requests
-from bs4 import BeautifulSoup
 
-from data_ingestion.base import Ingestor, IngestionResult
+from data_ingestion.base import BaseIngestor, IngestionResult
 from data_normalization.schemas import XGRecord
+from data_storage.duckdb_store import DuckDBStore
 from entity_resolution.id_mapper import EntityResolver
 
 logger = logging.getLogger(__name__)
 
-LEAGUE_CODES = {
-    "epl": "EPL",
-    "premier_league": "EPL",
-    "la_liga": "La_liga",
-    "bundesliga": "Bundesliga",
-    "serie_a": "Serie_A",
-    "ligue_1": "Ligue_1",
-    "rfpl": "RFPL",
+# Understat league slug → football-data.org / canonical name
+LEAGUE_SLUGS: dict[str, str] = {
+    "EPL": "EPL",
+    "La_liga": "La_liga",
+    "Bundesliga": "Bundesliga",
+    "Serie_A": "Serie_A",
+    "Ligue_1": "Ligue_1",
+    "RFPL": "RFPL",
 }
 
-_HEADERS = {"User-Agent": "Mozilla/5.0 (compatible; soccer-research-bot/1.0)"}
+BASE_URL = "https://understat.com/getLeagueData"
+REQUEST_TIMEOUT = 30
+# Be polite — Understat is a free community resource
+POLITE_DELAY_SECONDS = 2.0
 
 
-def _extract_json_blob(script_text: str, var_name: str) -> Any:
-    marker = f"var {var_name}"
-    start_idx = script_text.index(marker)
-    quote_start = script_text.index("('", start_idx) + 2
-    quote_end = script_text.index("')", quote_start)
-    raw = script_text[quote_start:quote_end]
-    # Understat JS-escapes its embedded JSON (\xHH style); this is the
-    # standard decode trick used across the community for this site.
-    # Rare special characters in names may come through slightly
-    # mangled — fix manually if you hit that on a specific team/player.
-    decoded = raw.encode("utf-8").decode("unicode_escape")
-    return json.loads(decoded)
+class UnderstatIngestor(BaseIngestor):
+    """
+    Fetches team-level xG histories from Understat for a given
+    league and season start year.
 
+    Usage:
+        ingestor = UnderstatIngestor(
+            store=store,
+            resolver=resolver,
+            league="EPL",
+            season_start_year=2025,   # for the 2025/26 season
+        )
+        result = ingestor.run()
+    """
 
-def _parse_understat_datetime(raw: str) -> datetime:
-    try:
-        return datetime.fromisoformat(raw)
-    except ValueError:
-        return datetime.strptime(raw, "%Y-%m-%d %H:%M:%S")
-
-
-class UnderstatXGIngestor(Ingestor):
     source_name = "understat"
 
-    def __init__(self, resolver: EntityResolver):
-        self.resolver = resolver
-
-    def fetch(self, league: str, season: str) -> list[dict[str, Any]]:
-        league_code = LEAGUE_CODES.get(league.lower(), league)
-        url = f"https://understat.com/league/{league_code}/{season}"
-
-        resp = requests.get(url, headers=_HEADERS, timeout=20)
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        for script in soup.find_all("script"):
-            text = script.string or ""
-            if "datesData" in text:
-                dates_data = _extract_json_blob(text, "datesData")
-                return [m for m in dates_data if m.get("isResult")]
-
-        raise ValueError(
-            "Could not find 'datesData' in the page — Understat's page "
-            "structure may have changed since this scraper was written. "
-            "Inspect the raw HTML/script tags to update the parsing logic."
-        )
-
-    def transform(self, raw_records: list[dict[str, Any]], store=None) -> list[XGRecord]:
-        out: list[XGRecord] = []
-        for raw in raw_records:
-            home = raw.get("h", {})
-            away = raw.get("a", {})
-            xg = raw.get("xG", {})
-            match_dt = _parse_understat_datetime(raw["datetime"])
-
-            home_canonical = self.resolver.resolve_team(
-                source=self.source_name, source_id=str(home.get("id")),
-                name=home.get("title", ""),
-            ).canonical_id
-            away_canonical = self.resolver.resolve_team(
-                source=self.source_name, source_id=str(away.get("id")),
-                name=away.get("title", ""),
-            ).canonical_id
-
-            match_canonical_id = self._resolve_match_canonical_id(
-                store, home_canonical, away_canonical, match_dt, raw["id"]
+    def __init__(
+        self,
+        store: DuckDBStore,
+        resolver: EntityResolver,
+        league: str,
+        season_start_year: int,
+    ) -> None:
+        super().__init__(store=store, resolver=resolver)
+        if league not in LEAGUE_SLUGS:
+            raise ValueError(
+                f"Unknown league '{league}'. "
+                f"Valid options: {list(LEAGUE_SLUGS.keys())}"
             )
-            if match_canonical_id is None:
-                continue  # team resolution failed; skip rather than guess
+        self.league = league
+        self.season_start_year = season_start_year
 
-            for team_canonical, side in ((home_canonical, "h"), (away_canonical, "a")):
-                xg_value = xg.get(side)
-                out.append(XGRecord(
+    # ------------------------------------------------------------------
+    # BaseIngestor interface
+    # ------------------------------------------------------------------
+
+    def fetch(self) -> dict[str, Any]:
+        url = f"{BASE_URL}/{self.league}/{self.season_start_year}"
+        logger.info("GET %s", url)
+        time.sleep(POLITE_DELAY_SECONDS)
+        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"Unexpected response type from Understat: {type(data)}"
+            )
+        return data
+
+    def transform(self, raw: dict[str, Any]) -> list[XGRecord]:
+        records: list[XGRecord] = []
+
+        for team_id_str, team_data in raw.items():
+            team_name: str = team_data.get("title", "")
+            history: list[dict] = team_data.get("history", [])
+
+            if not team_name:
+                logger.warning("Team entry %s missing 'title', skipping", team_id_str)
+                continue
+
+            # Resolve team → canonical_id
+            team_resolution = self.resolver.resolve_team(
+                source=self.source_name,
+                source_id=team_id_str,
+                name=team_name,
+            )
+            if team_resolution is None:
+                logger.warning(
+                    "Could not resolve team '%s' (id=%s), skipping its history",
+                    team_name,
+                    team_id_str,
+                )
+                continue
+
+            team_canonical_id = team_resolution.canonical_id
+
+            for entry in history:
+                match_canonical_id = self._resolve_match(
+                    team_canonical_id=team_canonical_id,
+                    team_name=team_name,
+                    entry=entry,
+                )
+                if match_canonical_id is None:
+                    continue
+
+                record = XGRecord(
                     source=self.source_name,
                     match_canonical_id=match_canonical_id,
-                    team_canonical_id=team_canonical,
-                    xg=float(xg_value) if xg_value is not None else None,
-                ))
-        return out
+                    team_canonical_id=team_canonical_id,
+                    xg=_safe_float(entry.get("xG")),
+                    npxg=_safe_float(entry.get("npxG")),
+                    xga=_safe_float(entry.get("xGA")),
+                    # Understat history entries don't include shot counts
+                    # at the team-history level; leave as None.
+                    shots=None,
+                    shots_on_target=None,
+                    possession_pct=None,
+                )
+                records.append(record)
 
-    def _resolve_match_canonical_id(
-        self, store, home_canonical, away_canonical, match_dt, understat_match_id
-    ) -> Optional[str]:
-        if home_canonical is None or away_canonical is None:
-            return None
+        return records
 
-        if store is not None:
-            row = store.conn.execute(
-                """
-                SELECT m.canonical_id
-                FROM matches m
-                JOIN id_mappings hm ON hm.entity_type = 'team' AND hm.source = m.source
-                                    AND hm.source_id = m.home_team_source_id
-                JOIN id_mappings am ON am.entity_type = 'team' AND am.source = m.source
-                                    AND am.source_id = m.away_team_source_id
-                WHERE hm.canonical_id = ? AND am.canonical_id = ?
-                  AND abs(date_diff('hour', m.kickoff_utc, ?)) <= 36
-                LIMIT 1
-                """,
-                [home_canonical, away_canonical, match_dt],
-            ).fetchone()
-            if row:
-                return row[0]
+    def validate_raw(self, raw: dict[str, Any]) -> bool:
+        if not raw:
+            logger.error("Understat returned empty payload")
+            return False
+        # Spot-check: every value should have 'title' and 'history'
+        sample = next(iter(raw.values()))
+        if "title" not in sample or "history" not in sample:
+            logger.error(
+                "Unexpected Understat payload shape; keys found: %s",
+                list(sample.keys()),
+            )
+            return False
+        return True
 
-        # no existing match found from another source — mint a new
-        # canonical id rooted in Understat's own match id
-        return self.resolver.resolve_match(source=self.source_name, source_id=str(understat_match_id))
-
-    def run(self, store, **kwargs) -> IngestionResult:
-        """Overridden: transform() needs `store` for the cross-source match
-        lookup, which the base class's generic run() doesn't pass through."""
-        try:
-            raw = self.fetch(**kwargs)
-        except Exception as e:
-            logger.exception("fetch failed for %s", self.source_name)
-            return IngestionResult(source=self.source_name, records_fetched=0,
-                                    records_stored=0, errors=[f"fetch: {e}"])
-
-        raw = self.validate_raw(raw)
-
-        try:
-            records = self.transform(raw, store=store)
-        except Exception as e:
-            logger.exception("transform failed for %s", self.source_name)
-            return IngestionResult(source=self.source_name, records_fetched=len(raw),
-                                    records_stored=0, errors=[f"transform: {e}"])
-
-        stored = 0
+    def run(self) -> IngestionResult:
         errors: list[str] = []
-        if records:
+        records_fetched = 0
+        records_stored = 0
+
+        try:
+            raw = self.fetch()
+        except Exception as exc:
+            msg = f"fetch() failed: {exc}"
+            logger.error(msg)
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=[msg],
+            )
+
+        if not self.validate_raw(raw):
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=["validate_raw() failed"],
+            )
+
+        try:
+            xg_records = self.transform(raw)
+            records_fetched = len(xg_records)
+        except Exception as exc:
+            msg = f"transform() failed: {exc}"
+            logger.error(msg)
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=[msg],
+            )
+
+        if xg_records:
             try:
-                stored = store.upsert_models(records)
-            except Exception as e:
-                logger.exception("store failed for %s", self.source_name)
-                errors.append(f"store: {e}")
+                self.store.upsert_models(xg_records)
+                records_stored = len(xg_records)
+            except Exception as exc:
+                msg = f"upsert_models() failed: {exc}"
+                logger.error(msg)
+                errors.append(msg)
 
         return IngestionResult(
             source=self.source_name,
-            records_fetched=len(raw),
-            records_stored=stored,
+            records_fetched=records_fetched,
+            records_stored=records_stored,
             errors=errors,
         )
 
+    # ------------------------------------------------------------------
+    # Internal helpers
+    # ------------------------------------------------------------------
 
-if __name__ == "__main__":
-    import sys
-    from pathlib import Path
+    def _resolve_match(
+        self,
+        team_canonical_id: str,
+        team_name: str,
+        entry: dict,
+    ) -> str | None:
+        """
+        Find the canonical match ID for a history entry.
 
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-    from data_storage.duckdb_store import DuckDBStore
+        Strategy: query DuckDB for a match involving this team within
+        a ±12-hour window of the Understat kickoff timestamp.
+        """
+        date_str: str = entry.get("date", "")
+        if not date_str:
+            logger.warning(
+                "History entry for '%s' missing 'date', skipping", team_name
+            )
+            return None
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
-    resolver = EntityResolver(store)
-    ingestor = UnderstatXGIngestor(resolver=resolver)
+        try:
+            kickoff_naive = datetime.strptime(date_str, "%Y-%m-%d %H:%M:%S")
+            # Understat dates are in UK local time (Europe/London).
+            # For simplicity treat as UTC — the ±12 h window absorbs the offset.
+            kickoff_utc = kickoff_naive.replace(tzinfo=timezone.utc)
+        except ValueError:
+            logger.warning(
+                "Could not parse date '%s' for team '%s', skipping",
+                date_str,
+                team_name,
+            )
+            return None
 
-    # Same league/season as the football-data.org test, so xG records
-    # should link up to the matches already in the database.
-    result = ingestor.run(store, league="EPL", season="2025")
-    print(result)
+        window_start = kickoff_utc - timedelta(hours=12)
+        window_end = kickoff_utc + timedelta(hours=12)
 
-    print("Total xG records in store:", store.table_row_count("xg_records"))
-    store.close()
+        con = self.store.con
+        result = con.execute(
+            """
+            SELECT canonical_id
+            FROM matches
+            WHERE
+                (home_team_canonical_id = ? OR away_team_canonical_id = ?)
+                AND kickoff_utc BETWEEN ? AND ?
+            LIMIT 1
+            """,
+            [
+                team_canonical_id,
+                team_canonical_id,
+                window_start.isoformat(),
+                window_end.isoformat(),
+            ],
+        ).fetchone()
+
+        if result is None:
+            logger.warning(
+                "No canonical match found for team '%s' (canonical_id=%s) "
+                "around %s — ingest matches first.",
+                team_name,
+                team_canonical_id,
+                date_str,
+            )
+            return None
+
+        return result[0]
+
+
+# ------------------------------------------------------------------
+# Utilities
+# ------------------------------------------------------------------
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
