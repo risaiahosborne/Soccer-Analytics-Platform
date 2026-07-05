@@ -1,6 +1,12 @@
+# Core dependencies for the DuckDB-based soccer data pipeline
 requests==2.34.2
 beautifulsoup4==4.15.0
 lxml==6.1.1
 rapidfuzz==3.14.5
 duckdb==1.5.4
 pydantic==2.13.4
+numpy==2.4.6
+pandas==2.3.3
+
+# The project already includes its own Understat scraper logic, so this package is not required here.
+# understatapi

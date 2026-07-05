@@ -10,16 +10,22 @@ This file is a compact troubleshooting record for recurring setup and runtime is
 
 ## Common commands
 - Install dependencies from the repo root:
-  `python -m pip install -r requirements.txt`
-- Run Python with project modules available from the repo root:
-  `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python ...`
-- Inspect DuckDB tables:
-  `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python - <<'PY'`
+  `python3 -m pip install -r requirements.txt`
+- Export the project import path before running ingestion scripts:
+  `export PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem`
+- Inspect DuckDB tables using the package-local database that receives ingested rows:
+  `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python3 - <<'PY'`
   `from data_storage.duckdb_store import DuckDBStore`
-  `store = DuckDBStore('data/soccer_smoketest.duckdb')`
-  `print(store.con.execute('SHOW TABLES').fetchall())`
+  `store = DuckDBStore('/workspaces/Soccer-App-1/ss_env/SoccerSystem/data/soccer_smoketest.duckdb')`
+  `print(store.conn.execute('SHOW TABLES').fetchall())`
   `store.close()`
   `PY`
+
+## Daily startup notes (verified 2026-07-05)
+- Use `python3` rather than `python`; this environment does not expose a `python` shim.
+- Export `PYTHONPATH` before any ingestion or inspection command.
+- The DuckDB file that receives ingested rows is the package-local database at `ss_env/SoccerSystem/data/soccer_smoketest.duckdb`.
+- The external `understatapi` package is not required here; the repo already contains its own scraper implementation.
 
 ## Project status update
 - The project currently uses a DuckDB-backed storage layer with Pydantic models and an entity-resolution layer for teams, players, and matches.
@@ -93,9 +99,10 @@ This file is a compact troubleshooting record for recurring setup and runtime is
   3. Begin model training.
 - [ENVIRONMENT REMINDERS]
   - Use `store.conn`, not `store.con`
-  - Use `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem`
-  - DB path: `data/soccer_smoketest.duckdb` from the repo root
+  - Use `python3` and `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem`
+  - DB path to inspect/write: `/workspaces/Soccer-App-1/ss_env/SoccerSystem/data/soccer_smoketest.duckdb`
   - Base class: `Ingestor`, not `BaseIngestor`
+  - Skip `pip install understatapi`; the repo uses its built-in Understat scraper code.
 
 ## What to tell the AI next time
 - [AI NOTE] If it references `store.con` or `self.store.con`, remind it that the project uses `DuckDBStore.conn` and that `store.con` is now aliased for compatibility.

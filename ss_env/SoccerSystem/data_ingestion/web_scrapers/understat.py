@@ -115,17 +115,35 @@ class UnderstatIngestor(Ingestor):
     # ------------------------------------------------------------------
 
     def fetch(self) -> dict[str, Any]:
-        logger.info("Fetching %s %d from Understat via understatapi", self.league, self.season_start_year)
-        from understatapi import UnderstatClient
-        with UnderstatClient() as understat:
-            data = understat.league(league=self.league).get_team_data(
-                season=str(self.season_start_year)
-            )
-        if not isinstance(data, dict):
-            raise ValueError(
-                f"Unexpected response type from Understat: {type(data)}"
-            )
-        return data
+        import json, re, requests
+        url = f"https://understat.com/league/{self.league}/{self.season_start_year}"
+        logger.info("GET %s", url)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(url, headers=headers, timeout=30)
+        resp.raise_for_status()
+        # Understat embeds JSON as hex-escaped strings inside JSON.parse() calls
+        matches = re.findall(r"JSON\.parse\('(.*?)'\)", resp.text)
+        if not matches:
+            raise ValueError("Could not find JSON.parse() in Understat page")
+        # Find the teamsData block — it contains team objects with "history" keys
+        for raw in matches:
+            try:
+                decoded = raw.encode().decode("raw_unicode_escape").encode("raw_unicode_escape").decode("unicode_escape")
+                data = json.loads(decoded)
+                if isinstance(data, dict) and any("history" in str(v) for v in list(data.values())[:1]):
+                    return data
+            except Exception:
+                continue
+        # Fallback: try direct hex decode on all matches
+        for raw in matches:
+            try:
+                decoded = bytes(raw, "utf-8").decode("unicode_escape")
+                data = json.loads(decoded)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                continue
+        raise ValueError("Could not decode teamsData from Understat page")
 
     def transform(self, raw: dict[str, Any]) -> list[XGRecord]:
         records: list[XGRecord] = []
