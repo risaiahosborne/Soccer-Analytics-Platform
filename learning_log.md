@@ -59,8 +59,55 @@ This file is a compact troubleshooting record for recurring setup and runtime is
 - [FIX] Updated it to use the current `Ingestor` API and `store.conn` for database access.
 - [WORKAROUND] This module still requires the environment variable `API_FOOTBALL_KEY` to run.
 
+## 2026-07-05
+
+### [PROCESS] Push changes to GitHub
+- [STEP] Confirm the repository state from the repo root:
+  `git status --short`
+  `git branch --show-current`
+  `git remote -v`
+- [STEP] If changes are pending, stage and commit them before pushing:
+  `git add .`
+  `git commit -m "<descriptive message>"`
+- [STEP] Push the current branch to the configured GitHub remote:
+  `git push origin main`
+- [NOTE] In this case, the repo was already on `main`, had no uncommitted changes, and the push completed successfully to `origin`.
+
+#### [FIXED] matches table column names verified and populated
+- home_team_canonical_id and away_team_canonical_id confirmed present and populated.
+- Root cause: schemas.py edit was not saved initially; also corrupted by another AI agent adding bogus `from math import Math`.
+- Fixed by: removing bad import, confirming schema fields, re-running football_data_org ingestor.
+
+### [BLOCKER] Weather ingestor needs static stadium coordinates
+- [CAUSE] The `matches` table does not include `venue_lat` or `venue_lon`, so the weather ingestor cannot fetch coordinates from the DB.
+- [NEED] Add a static EPL stadium coordinates lookup (by home team canonical ID or team name) in the weather ingestor and build weather requests from that data instead of querying match coordinates from the database.
+- [STATUS] Other data is ready:
+  - matches: 380 ✅
+  - xg_records: 608 ✅
+  - odds_snapshots: 2200 EPL rows ✅
+  - squad_valuations: 693 ✅
+  - weather_records: 0 ⬜ blocked
+- [NEXT SESSION PRIORITY ORDER]
+  1. Fix weather ingestor with static stadium coordinates.
+  2. Run `FeatureBuilder.build_matrix(league="Premier League", season="2025/2026")` to confirm the full feature matrix builds cleanly.
+  3. Begin model training.
+- [ENVIRONMENT REMINDERS]
+  - Use `store.conn`, not `store.con`
+  - Use `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem`
+  - DB path: `data/soccer_smoketest.duckdb` from the repo root
+  - Base class: `Ingestor`, not `BaseIngestor`
+
 ## What to tell the AI next time
 - [AI NOTE] If it references `store.con` or `self.store.con`, remind it that the project uses `DuckDBStore.conn` and that `store.con` is now aliased for compatibility.
 - [AI NOTE] If it hits `ModuleNotFoundError` for `data_storage` or `data_ingestion`, tell it to use the repo-root `sitecustomize.py` helper or add `ss_env/SoccerSystem` to `PYTHONPATH`.
 - [AI NOTE] If it tries to install dependencies from inside `ss_env/SoccerSystem`, remind it that `requirements.txt` is at the repo root.
 - [AI NOTE] If it edits ingestors, keep them compatible with the current `Ingestor` interface and `DuckDBStore` API.
+
+
+Recommended order before model training:
+
+Re-run odds ingestor targeting EPL
+Re-run weather ingestor against all 380 matches
+Investigate squad valuation linking
+Re-run quality checks
+Test build_matrix() end to end

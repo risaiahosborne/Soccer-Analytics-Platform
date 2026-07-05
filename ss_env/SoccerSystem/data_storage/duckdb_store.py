@@ -58,21 +58,23 @@ CREATE TABLE IF NOT EXISTS players (
 );
 
 CREATE TABLE IF NOT EXISTS matches (
-    canonical_id        VARCHAR,
-    source               VARCHAR NOT NULL,
-    source_id            VARCHAR NOT NULL,
-    competition          VARCHAR NOT NULL,
-    season                VARCHAR NOT NULL,
-    kickoff_utc          TIMESTAMP NOT NULL,
-    status                VARCHAR NOT NULL,
-    home_team_source_id  VARCHAR NOT NULL,
-    away_team_source_id  VARCHAR NOT NULL,
-    home_score            INTEGER,
-    away_score            INTEGER,
-    venue_name            VARCHAR,
-    referee               VARCHAR,
-    matchday              INTEGER,
-    ingested_at           TIMESTAMP,
+    canonical_id             VARCHAR,
+    source                   VARCHAR NOT NULL,
+    source_id                VARCHAR NOT NULL,
+    competition              VARCHAR NOT NULL,
+    season                   VARCHAR NOT NULL,
+    kickoff_utc              TIMESTAMP NOT NULL,
+    status                   VARCHAR NOT NULL,
+    home_team_source_id      VARCHAR NOT NULL,
+    away_team_source_id      VARCHAR NOT NULL,
+    home_team_canonical_id   VARCHAR,
+    away_team_canonical_id   VARCHAR,
+    home_score               INTEGER,
+    away_score               INTEGER,
+    venue_name               VARCHAR,
+    referee                  VARCHAR,
+    matchday                 INTEGER,
+    ingested_at              TIMESTAMP,
     PRIMARY KEY (source, source_id)
 );
 
@@ -207,6 +209,24 @@ class DuckDBStore:
 
     def _init_schema(self) -> None:
         self.conn.execute(DDL_STATEMENTS)
+        self._run_migrations()
+
+    def _run_migrations(self) -> None:
+        """Add columns that didn't exist in earlier schema versions."""
+        existing = {
+            row[0]
+            for row in self.conn.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'matches'"
+            ).fetchall()
+        }
+        if "home_team_canonical_id" not in existing:
+            self.conn.execute(
+                "ALTER TABLE matches ADD COLUMN home_team_canonical_id VARCHAR"
+            )
+        if "away_team_canonical_id" not in existing:
+            self.conn.execute(
+                "ALTER TABLE matches ADD COLUMN away_team_canonical_id VARCHAR"
+            )
 
     def close(self) -> None:
         self.conn.close()

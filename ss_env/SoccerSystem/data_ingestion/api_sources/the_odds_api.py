@@ -236,7 +236,7 @@ if __name__ == "__main__":
 
     # World Cup, h2h, one region -> cheapest possible test call (1 credit if
     # events exist, 0 credits if the call returns empty)
-    result = ingestor.run(store, sport_keys=["soccer_fifa_world_cup"], regions="uk", markets="h2h")
+    result = ingestor.run(store, sport_keys=["soccer_epl"], regions="uk", markets="h2h,totals,btts")
     print(result)
 
     print("Total odds snapshots in store:", store.table_row_count("odds_snapshots"))

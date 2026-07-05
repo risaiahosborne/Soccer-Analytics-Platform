@@ -113,9 +113,9 @@ class FootballDataOrgIngestor(Ingestor):
             clean.append(r)
         return clean
 
-    def transform(self, raw_records: list[dict[str, Any]]) -> list[Match]:
+    def transform(self, raw_records: list[dict[str, Any]]) -> list[Match]: #Made edits to transform to add canonical_id for home and away teams
         self._team_models = []
-        teams_seen: set[str] = set()
+        teams_seen: dict[str, str] = {}   # source_id → canonical_id
         matches_out: list[Match] = []
 
         for raw in raw_records:
@@ -129,6 +129,7 @@ class FootballDataOrgIngestor(Ingestor):
 
             comp_name = comp.get("name", "Unknown")
 
+            # Resolve both teams, capturing canonical IDs
             for team in (home, away):
                 tid = team.get("id")
                 if tid is None:
@@ -136,7 +137,6 @@ class FootballDataOrgIngestor(Ingestor):
                 tid_str = str(tid)
                 if tid_str in teams_seen:
                     continue
-                teams_seen.add(tid_str)
 
                 team_resolution = self.resolver.resolve_team(
                     source=self.source_name,
@@ -144,6 +144,7 @@ class FootballDataOrgIngestor(Ingestor):
                     name=team.get("name", ""),
                     league=comp_name,
                 )
+                teams_seen[tid_str] = team_resolution.canonical_id  # ← store it
                 self._team_models.append(Team(
                     canonical_id=team_resolution.canonical_id,
                     source=self.source_name,
@@ -152,6 +153,9 @@ class FootballDataOrgIngestor(Ingestor):
                     short_name=team.get("shortName"),
                     league=comp_name,
                 ))
+
+            home_id_str = str(home.get("id"))
+            away_id_str = str(away.get("id"))
 
             match_canonical_id = self.resolver.resolve_match(
                 source=self.source_name, source_id=str(raw["id"])
@@ -165,8 +169,10 @@ class FootballDataOrgIngestor(Ingestor):
                 season=_season_string(season_info),
                 kickoff_utc=datetime.fromisoformat(raw["utcDate"].replace("Z", "+00:00")),
                 status=_STATUS_MAP.get(raw.get("status", ""), MatchStatus.SCHEDULED),
-                home_team_source_id=str(home.get("id")),
-                away_team_source_id=str(away.get("id")),
+                home_team_source_id=home_id_str,
+                away_team_source_id=away_id_str,
+                home_team_canonical_id=teams_seen.get(home_id_str),   # ← NEW
+                away_team_canonical_id=teams_seen.get(away_id_str),   # ← NEW
                 home_score=score.get("home"),
                 away_score=score.get("away"),
                 venue_name=raw.get("venue"),
@@ -236,7 +242,7 @@ if __name__ == "__main__":
     # Premier League, 2025/26 season, just-finished matches — small & cheap.
     # Season is passed explicitly because the API's "current season" default
     # is ambiguous during the off-season window between seasons.
-    result = ingestor.run(store, competition_codes=["PL"], season="2025", status="FINISHED", matchday=1)
+    result = ingestor.run(store, competition_codes=["PL"], season="2025", status="FINISHED")
     print(result)
 
     row_count = store.table_row_count("matches")

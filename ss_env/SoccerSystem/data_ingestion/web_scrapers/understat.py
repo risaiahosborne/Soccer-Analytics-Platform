@@ -55,9 +55,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-import requests
 
-from data_ingestion.base import BaseIngestor, IngestionResult
+from data_ingestion.base import Ingestor, IngestionResult
 from data_normalization.schemas import XGRecord
 from data_storage.duckdb_store import DuckDBStore
 from entity_resolution.id_mapper import EntityResolver
@@ -74,13 +73,10 @@ LEAGUE_SLUGS: dict[str, str] = {
     "RFPL": "RFPL",
 }
 
-BASE_URL = "https://understat.com/getLeagueData"
-REQUEST_TIMEOUT = 30
 # Be polite — Understat is a free community resource
-POLITE_DELAY_SECONDS = 2.0
 
 
-class UnderstatIngestor(BaseIngestor):
+class UnderstatIngestor(Ingestor):
     """
     Fetches team-level xG histories from Understat for a given
     league and season start year.
@@ -104,7 +100,8 @@ class UnderstatIngestor(BaseIngestor):
         league: str,
         season_start_year: int,
     ) -> None:
-        super().__init__(store=store, resolver=resolver)
+        self.store = store
+        self.resolver = resolver
         if league not in LEAGUE_SLUGS:
             raise ValueError(
                 f"Unknown league '{league}'. "
@@ -118,12 +115,12 @@ class UnderstatIngestor(BaseIngestor):
     # ------------------------------------------------------------------
 
     def fetch(self) -> dict[str, Any]:
-        url = f"{BASE_URL}/{self.league}/{self.season_start_year}"
-        logger.info("GET %s", url)
-        time.sleep(POLITE_DELAY_SECONDS)
-        resp = requests.get(url, timeout=REQUEST_TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
+        logger.info("Fetching %s %d from Understat via understatapi", self.league, self.season_start_year)
+        from understatapi import UnderstatClient
+        with UnderstatClient() as understat:
+            data = understat.league(league=self.league).get_team_data(
+                season=str(self.season_start_year)
+            )
         if not isinstance(data, dict):
             raise ValueError(
                 f"Unexpected response type from Understat: {type(data)}"
@@ -290,7 +287,7 @@ class UnderstatIngestor(BaseIngestor):
         window_start = kickoff_utc - timedelta(hours=12)
         window_end = kickoff_utc + timedelta(hours=12)
 
-        con = self.store.con
+        con = self.store.conn
         result = con.execute(
             """
             SELECT canonical_id

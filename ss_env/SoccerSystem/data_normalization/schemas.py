@@ -99,6 +99,8 @@ class Match(StrictModel):
     status: MatchStatus
     home_team_source_id: str
     away_team_source_id: str
+    home_team_canonical_id: Optional[str] = None   # ← Added this as an update to the schema for matching IDS
+    away_team_canonical_id: Optional[str] = None   # ← Added this as an update to the schema for matching IDS
     home_score: Optional[int] = None
     away_score: Optional[int] = None
     venue_name: Optional[str] = None
