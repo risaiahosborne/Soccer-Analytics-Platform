@@ -47,20 +47,68 @@ class CheckSpec:
 # ---------------------------------------------------------------------------
 
 def null_rate_check(store: DuckDBStore, table: str, column: str, max_null_pct: float = 0.0) -> QualityCheckResult:
-    total = store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    try:
+        total = store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    except Exception as exc:
+        return QualityCheckResult(
+            check_name=f"null_rate:{column}", table_name=table,
+            passed=False, rows_checked=0, rows_failed=0,
+            details=f"table '{table}' does not exist or is unreadable: {exc}",
+        )
     if total == 0:
         return QualityCheckResult(
             check_name=f"null_rate:{column}", table_name=table,
             passed=True, rows_checked=0, rows_failed=0,
             details="table is empty; nothing to check",
         )
-    nulls = store.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} IS NULL").fetchone()[0]
+    try:
+        nulls = store.conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} IS NULL").fetchone()[0]
+    except Exception as exc:
+        return QualityCheckResult(
+            check_name=f"null_rate:{column}", table_name=table,
+            passed=False, rows_checked=total, rows_failed=total,
+            details=f"column '{column}' is missing or unreadable: {exc}",
+        )
     pct = nulls / total
     passed = pct <= max_null_pct
     return QualityCheckResult(
         check_name=f"null_rate:{column}", table_name=table,
         passed=passed, rows_checked=total, rows_failed=nulls,
         details=f"{nulls}/{total} ({pct:.1%}) NULL, threshold {max_null_pct:.0%}",
+    )
+
+
+def canonical_id_presence_check(store: DuckDBStore, table: str, id_columns: tuple[str, ...] = ("home_team_canonical_id", "away_team_canonical_id")) -> QualityCheckResult:
+    try:
+        total = store.conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+    except Exception as exc:
+        return QualityCheckResult(
+            check_name="canonical_id_presence", table_name=table,
+            passed=False, rows_checked=0, rows_failed=0,
+            details=f"table '{table}' does not exist or is unreadable: {exc}",
+        )
+    if total == 0:
+        return QualityCheckResult(
+            check_name="canonical_id_presence", table_name=table,
+            passed=True, rows_checked=0, rows_failed=0,
+            details="table is empty; nothing to check",
+        )
+    try:
+        conditions = " OR ".join(f"COALESCE({col}, '') = ''" for col in id_columns)
+        failed = store.conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE ({conditions})"
+        ).fetchone()[0]
+    except Exception as exc:
+        return QualityCheckResult(
+            check_name="canonical_id_presence", table_name=table,
+            passed=False, rows_checked=total, rows_failed=total,
+            details=f"required canonical ID columns are missing or unreadable: {exc}",
+        )
+    passed = failed == 0
+    return QualityCheckResult(
+        check_name="canonical_id_presence", table_name=table,
+        passed=passed, rows_checked=total, rows_failed=failed,
+        details=f"{failed}/{total} rows missing canonical IDs in {', '.join(id_columns)}",
     )
 
 
@@ -199,6 +247,8 @@ def default_check_suite() -> list[CheckSpec]:
                    lambda s: range_check(s, "matches", "away_score", min_val=0, max_val=20)),
         CheckSpec("matches_no_duplicates", "matches",
                    lambda s: duplicate_check(s, "matches", ["source", "source_id"])),
+        CheckSpec("matches_canonical_ids_present", "matches",
+                   lambda s: canonical_id_presence_check(s, "matches")),
         CheckSpec("matches_referential_home_team", "matches",
                    lambda s: referential_integrity_check(s, "matches", "home_team_source_id", "teams")),
         CheckSpec("matches_referential_away_team", "matches",

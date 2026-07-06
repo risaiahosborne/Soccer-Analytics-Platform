@@ -110,6 +110,13 @@ This file is a compact troubleshooting record for recurring setup and runtime is
 - [AI NOTE] If it tries to install dependencies from inside `ss_env/SoccerSystem`, remind it that `requirements.txt` is at the repo root.
 - [AI NOTE] If it edits ingestors, keep them compatible with the current `Ingestor` interface and `DuckDBStore` API.
 
+## 2026-07-06
+
+### [IMPROVEMENT] Quality checks now cover missing canonical IDs
+- [CHANGE] Added a `canonical_id_presence_check` for match rows so missing `home_team_canonical_id` / `away_team_canonical_id` values are surfaced explicitly.
+- [CHANGE] Hardened null-rate checks to return clear failure details when a table or column is missing instead of crashing.
+- [VERIFY] Ran `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python3 -m pytest -q tests/test_quality_checks.py` and got `2 passed`.
+- [VERIFY] Ran the quality runner against `data/soccer_smoketest.duckdb` and got `13/13 checks passed`.
 
 Recommended order before model training:
 
