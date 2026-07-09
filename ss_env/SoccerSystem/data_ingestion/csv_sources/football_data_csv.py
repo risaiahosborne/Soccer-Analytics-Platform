@@ -38,7 +38,7 @@ import requests
 import pandas as pd
 
 from data_ingestion.base import Ingestor, IngestionResult
-from data_normalization.schemas import OddsSnapshot
+from data_normalization.schemas import OddsSnapshot, XGRecord
 from data_storage.duckdb_store import DuckDBStore
 from entity_resolution.id_mapper import EntityResolver
 
@@ -55,6 +55,37 @@ LEAGUE_CSV_CODES: dict[str, str] = {
 }
 
 BASE_URL = "https://www.football-data.co.uk/mmz4281"
+
+# football-data.co.uk uses short team names — map to full names
+# so entity resolver can match them to canonical IDs
+TEAM_NAME_MAP: dict[str, str] = {
+    "Man United":     "Manchester United FC",
+    "Man City":       "Manchester City FC",
+    "Newcastle":      "Newcastle United FC",
+    "Spurs":          "Tottenham Hotspur FC",
+    "Tottenham":      "Tottenham Hotspur FC",
+    "Wolves":         "Wolverhampton Wanderers FC",
+    "West Ham":       "West Ham United FC",
+    "Nott'm Forest":  "Nottingham Forest FC",
+    "Brighton":       "Brighton & Hove Albion FC",
+    "Leicester":      "Leicester City FC",
+    "Leeds":          "Leeds United FC",
+    "Aston Villa":    "Aston Villa FC",
+    "Arsenal":        "Arsenal FC",
+    "Chelsea":        "Chelsea FC",
+    "Liverpool":      "Liverpool FC",
+    "Everton":        "Everton FC",
+    "Fulham":         "Fulham FC",
+    "Brentford":      "Brentford FC",
+    "Burnley":        "Burnley FC",
+    "Sunderland":     "Sunderland AFC",
+    "Bournemouth":    "AFC Bournemouth",
+    "Crystal Palace": "Crystal Palace FC",
+    "Southampton":    "Southampton FC",
+    "Ipswich":        "Ipswich Town FC",
+    "Sheffield United": "Sheffield United FC",
+    "Luton":          "Luton Town FC",
+}
 
 
 def _season_code(season_start_year: int) -> str:
@@ -124,8 +155,9 @@ class FootballDataCsvIngestor(Ingestor):
             return False
         return True
 
-    def transform(self, raw: pd.DataFrame) -> list[OddsSnapshot]:
+    def transform(self, raw: pd.DataFrame) -> tuple[list[OddsSnapshot], list[XGRecord]]:
         snapshots: list[OddsSnapshot] = []
+        xg_records: list[XGRecord] = []
 
         for _, row in raw.iterrows():
             kickoff_utc = _parse_kickoff(row)
@@ -136,6 +168,8 @@ class FootballDataCsvIngestor(Ingestor):
             away_name = str(row.get("AwayTeam", "")).strip()
             if not home_name or not away_name:
                 continue
+            home_name = TEAM_NAME_MAP.get(home_name, home_name)
+            away_name = TEAM_NAME_MAP.get(away_name, away_name)
 
             # Resolve teams → canonical match
             home_res = self.resolver.resolve_team(
@@ -167,7 +201,29 @@ class FootballDataCsvIngestor(Ingestor):
                 _build_snapshots(row, match_canonical_id, kickoff_utc)
             )
 
-        return snapshots
+            if home_canonical:
+                xg_records.append(XGRecord(
+                    source="football-data-csv",
+                    match_canonical_id=match_canonical_id,
+                    team_canonical_id=home_canonical,
+                    xg=None, npxg=None, xga=None,
+                    shots=_safe_int(row.get("HS")),
+                    shots_on_target=_safe_int(row.get("HST")),
+                    possession_pct=None,
+                ))
+
+            if away_canonical:
+                xg_records.append(XGRecord(
+                    source="football-data-csv",
+                    match_canonical_id=match_canonical_id,
+                    team_canonical_id=away_canonical,
+                    xg=None, npxg=None, xga=None,
+                    shots=_safe_int(row.get("AS")),
+                    shots_on_target=_safe_int(row.get("AST")),
+                    possession_pct=None,
+                ))
+
+        return snapshots, xg_records
 
     def run(self) -> IngestionResult:
         errors: list[str] = []
@@ -193,7 +249,7 @@ class FootballDataCsvIngestor(Ingestor):
             )
 
         try:
-            snapshots = self.transform(raw)
+            snapshots, xg_records = self.transform(raw)
         except Exception as exc:
             msg = f"transform() failed: {exc}"
             logger.error(msg)
@@ -205,14 +261,18 @@ class FootballDataCsvIngestor(Ingestor):
             )
 
         records_stored = 0
-        if snapshots:
-            try:
+        try:
+            if snapshots:
                 self.store.upsert_models(snapshots)
-                records_stored = len(snapshots)
-            except Exception as exc:
-                msg = f"upsert_models() failed: {exc}"
-                logger.error(msg)
-                errors.append(msg)
+                records_stored += len(snapshots)
+            if xg_records:
+                self.store.upsert_models(xg_records)
+                records_stored += len(xg_records)
+                logger.info("Stored %d xG proxy records", len(xg_records))
+        except Exception as exc:
+            msg = f"upsert_models() failed: {exc}"
+            logger.error(msg)
+            errors.append(msg)
 
         return IngestionResult(
             source=self.source_name,
@@ -345,6 +405,16 @@ def _parse_kickoff(row: pd.Series) -> datetime | None:
             return dt.replace(tzinfo=timezone.utc)
         except ValueError:
             return None
+
+
+def _safe_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    try:
+        f = float(value)
+        return None if pd.isna(f) else int(f)
+    except (TypeError, ValueError):
+        return None
 
 
 def _safe_float(value: Any) -> float | None:
