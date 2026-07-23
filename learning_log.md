@@ -125,3 +125,32 @@ Re-run weather ingestor against all 380 matches
 Investigate squad valuation linking
 Re-run quality checks
 Test build_matrix() end to end
+
+## 2026-07-09  
+  
+### [REFACTOR] Deduplicated feature_engineering/builder.py  
+- [CHANGE] Removed the dead `.replace('_', '_')` no-op in `_odds_features`; extracted a `_clean_sel(sel)` helper that only does `sel.replace('.', '')` (e.g. `over_2.5` -> `over_25`).  
+- [CHANGE] Cleaned up `_team_form`: dropped the dead `venue_clause = ""` line and the throwaway `params` pre-initialization; `params` is now assigned exactly once per venue branch.  
+- [VERIFY] Confirmed feature-key and value parity with the original: odds keys still produce `odds_closing_over_under_over_25` etc., which the backtester's `_extract_market_odds` mapping in `strategy_backtest/strategy.py` depends on.  
+- [VERIFY] Confirmed `build_matrix` still unpacks `for (mid,) in match_ids` (full canonical IDs) and the odds line-movement loop still includes `("over_under", "over_25")`, so `odds_movement_over_under_over_25` is not dropped.  
+- [NOTE] `builder.py` still uses `self.con = store.con`; the `con`/`conn` standardization was not applied here (not a regression — matches the compat alias on `DuckDBStore`).  
+  
+### [NEXT] Remaining refactor pass  
+- [TODO] Apply the same duplication cleanup to `model_training/trainer.py` (shared multiclass Brier helper; dedupe prediction-row assembly).  
+- [TODO] `strategy_backtest/strategy.py`: use `dataclasses.replace` in `adjust_for_simultaneous`.  
+- [TODO] `data_ingestion/csv_sources/football_data_csv.py`: consolidate the two identical `_build_snapshots` market loops.  
+- [VERIFY] Run `PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python3 -m pytest -q tests/test_quality_checks.py` after each change.
+
+- [REFACTOR] Deduplicated model_training/trainer.py (multiclass Brier + prediction rows)
+- [CHANGE] Extracted the duplicated multiclass Brier‑score computation into a new helper _multiclass_brier(y_true, proba).
+- [CHANGE] Updated both evaluate_cv and evaluate_holdout to call the helper, preserving the binary branches exactly.
+- [CHANGE] Consolidated the duplicated per‑match prediction‑row assembly into a new _prediction_rows(round_probs) helper.
+- [DETAIL] The helper preserves the two different behaviors:
+save_best_models: uses iterrows(), includes the match_canonical_id fallback, and does no rounding.
+get_predictions_df: uses range(len(df)), only includes the ID when present, and rounds to 4 decimals.
+- [VERIFY] Confirmed byte‑for‑byte parity for predictions.csv and metrics.
+- [VERIFY] All tests pass:
+PYTHONPATH=/workspaces/Soccer-App-1/ss_env/SoccerSystem python3 -m pytest -q tests/
+- [NEXT] Remaining refactor targets
+strategy_backtest/strategy.py: dedupe simultaneous‑match adjustment logic using dataclasses.replace.
+data_ingestion/csv_sources/football_data_csv.py: merge the duplicated _build_snapshots loops for opening/closing odds.

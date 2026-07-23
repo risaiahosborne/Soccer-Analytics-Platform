@@ -235,7 +235,7 @@ if __name__ == "__main__":
         print(r'  set FOOTBALL_DATA_API_KEY=your_key_here   (Command Prompt)')
         sys.exit(1)
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
     ingestor = FootballDataOrgIngestor(api_token=api_key, resolver=resolver)
 

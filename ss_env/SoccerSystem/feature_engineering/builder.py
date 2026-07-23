@@ -49,7 +49,7 @@ def _clean_sel(sel: str) -> str:
 
 class FeatureBuilder:
     def __init__(self, store: DuckDBStore) -> None:
-        self.con = store.con
+        self.con = store.conn
 
     # ------------------------------------------------------------------
     # Public API
@@ -512,12 +512,67 @@ class FeatureBuilder:
             row = self.con.execute(
                 """
                 SELECT canonical_id, kickoff_utc, status,
-                       home_team_canonical_id, away_team_canonical_id,
-                       home_score, away_score, matchday, competition, season
+                    home_team_canonical_id, away_team_canonical_id,
+                    home_score, away_score, matchday, competition, season
                 FROM matches
                 WHERE canonical_id = ?
                 """,
                 [match_canonical_id],
             ).fetchone()
-        except Exception:
+        except Exception as exc:
+            logger.error("Match lookup failed: %s", exc)
             return None
+
+        if row is None:
+            return None
+
+        keys = [
+            "canonical_id", "kickoff_utc", "status",
+            "home_team_canonical_id", "away_team_canonical_id",
+            "home_score", "away_score", "matchday", "competition", "season",
+        ]
+        d = dict(zip(keys, row))
+
+        if isinstance(d["kickoff_utc"], str):
+            d["kickoff_utc"] = datetime.fromisoformat(d["kickoff_utc"])
+
+        return d
+
+# ------------------------------------------------------------------
+# Modular Helpers
+# ------------------------------------------------------------------
+
+def _safe_div(a, b) -> float | None:
+    if a is None or b is None or b == 0:
+        return None
+    return round(a / b, 4)
+
+def _empty_form() -> dict:
+    return {
+        "matches_played": 0,
+        "goals_scored_avg": None,
+        "goals_conceded_avg": None,
+        "win_rate": None,
+        "draw_rate": None,
+        "loss_rate": None,
+        "points_per_game": None,
+        "clean_sheet_rate": None,
+        "btts_rate": None,
+        "over25_rate": None,
+        "xg_avg": None,
+        "xga_avg": None,
+        "npxg_avg": None,
+    }
+def _empty_h2h() -> dict:
+    return {
+        "h2h_matches": 0,
+        "h2h_home_win_rate": None,
+        "h2h_draw_rate": None,
+        "h2h_away_win_rate": None,
+        "h2h_avg_total_goals": None,
+        "h2h_btts_rate": None,
+        "h2h_over25_rate": None,
+    }
+
+def _prefix(d: dict, prefix: str) -> dict:
+    return {f"{prefix}__{k}": v for k, v in d.items()}

@@ -230,7 +230,7 @@ if __name__ == "__main__":
         print(r"  set ODDS_API_KEY=your_key_here   (Command Prompt)")
         sys.exit(1)
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
     ingestor = TheOddsApiIngestor(api_key=api_key, resolver=resolver)
 
