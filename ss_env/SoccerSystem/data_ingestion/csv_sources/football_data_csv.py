@@ -315,6 +315,36 @@ class FootballDataCsvIngestor(Ingestor):
 
         return result[0] if result else None
 
+# ------------------------------------------------------------------
+# Helper function
+# ------------------------------------------------------------------
+def _extract_market_snapshots(
+    match_canonical_id: str,
+    bookmaker: str,
+    market: str,
+    selections: list[tuple[str, float, datetime, bool, bool]],
+) -> list[OddsSnapshot]:
+    """
+    Shared helper for opening/closing odds snapshot extraction.
+    Preserves exact behavior and ordering of the original loops.
+    """
+    out = []
+    for sel_name, price, captured_at, is_open, is_close in selections:
+        if price is None or price <= 1.0:
+            continue
+        out.append(OddsSnapshot(
+            source="football-data-csv",
+            match_canonical_id=match_canonical_id,
+            bookmaker=bookmaker,
+            market=market,
+            selection=sel_name,
+            price_decimal=price,
+            captured_at=captured_at,
+            is_opening=is_open,
+            is_closing=is_close,
+        ))
+    return out
+
 
 # ------------------------------------------------------------------
 # Snapshot builders
@@ -325,7 +355,8 @@ def _build_snapshots(
     match_canonical_id: str,
     kickoff_utc: datetime,
 ) -> list[OddsSnapshot]:
-    """Build OddsSnapshot records from one CSV row."""
+    """Build OddsSnapshot records from one CSV row (deduplicated version)."""
+
     snaps: list[OddsSnapshot] = []
 
     # Opening: captured ~3 days before kickoff (approximation)
@@ -338,57 +369,40 @@ def _build_snapshots(
         ("bet365",  "B365H",  "B365D",  "B365A",  "B365CH",  "B365CD",  "B365CA"),
         ("average", "AvgH",   "AvgD",   "AvgA",   "AvgCH",   "AvgCD",   "AvgCA"),
     ]:
-        for col, sel, timing, captured_at, is_open, is_close in [
-            (h_col,  "home",  "opening", opening_time, True,  False),
-            (d_col,  "draw",  "opening", opening_time, True,  False),
-            (a_col,  "away",  "opening", opening_time, True,  False),
-            (ch_col, "home",  "closing", closing_time, False, True),
-            (cd_col, "draw",  "closing", closing_time, False, True),
-            (ca_col, "away",  "closing", closing_time, False, True),
-        ]:
-            price = _safe_float(row.get(col))
-            if price is None or price <= 1.0:
-                continue
-            snaps.append(OddsSnapshot(
-                source="football-data-csv",
-                match_canonical_id=match_canonical_id,
-                bookmaker=bookmaker,
-                market="1x2",
-                selection=sel,
-                price_decimal=price,
-                captured_at=captured_at,
-                is_opening=is_open,
-                is_closing=is_close,
-            ))
+        selections = [
+            ("home", _safe_float(row.get(h_col)),  opening_time, True,  False),
+            ("draw", _safe_float(row.get(d_col)),  opening_time, True,  False),
+            ("away", _safe_float(row.get(a_col)),  opening_time, True,  False),
+            ("home", _safe_float(row.get(ch_col)), closing_time, False, True),
+            ("draw", _safe_float(row.get(cd_col)), closing_time, False, True),
+            ("away", _safe_float(row.get(ca_col)), closing_time, False, True),
+        ]
+        snaps.extend(_extract_market_snapshots(
+            match_canonical_id,
+            bookmaker,
+            "1x2",
+            selections,
+        ))
 
     # --- Over/Under 2.5 markets ---
     for bookmaker, o_col, u_col, co_col, cu_col in [
         ("bet365",  "B365>2.5", "B365<2.5", "B365C>2.5", "B365C<2.5"),
         ("average", "Avg>2.5",  "Avg<2.5",  "AvgC>2.5",  "AvgC<2.5"),
     ]:
-        for col, sel, captured_at, is_open, is_close in [
-            (o_col,  "over_2.5",  opening_time, True,  False),
-            (u_col,  "under_2.5", opening_time, True,  False),
-            (co_col, "over_2.5",  closing_time, False, True),
-            (cu_col, "under_2.5", closing_time, False, True),
-        ]:
-            price = _safe_float(row.get(col))
-            if price is None or price <= 1.0:
-                continue
-            snaps.append(OddsSnapshot(
-                source="football-data-csv",
-                match_canonical_id=match_canonical_id,
-                bookmaker=bookmaker,
-                market="over_under",
-                selection=sel,
-                price_decimal=price,
-                captured_at=captured_at,
-                is_opening=is_open,
-                is_closing=is_close,
-            ))
+        selections = [
+            ("over_2.5",  _safe_float(row.get(o_col)),  opening_time, True,  False),
+            ("under_2.5", _safe_float(row.get(u_col)),  opening_time, True,  False),
+            ("over_2.5",  _safe_float(row.get(co_col)), closing_time, False, True),
+            ("under_2.5", _safe_float(row.get(cu_col)), closing_time, False, True),
+        ]
+        snaps.extend(_extract_market_snapshots(
+            match_canonical_id,
+            bookmaker,
+            "over_under",
+            selections,
+        ))
 
     return snaps
-
 
 def _parse_kickoff(row: pd.Series) -> datetime | None:
     date_str = str(row.get("Date", "")).strip()
@@ -436,7 +450,7 @@ if __name__ == "__main__":
     from entity_resolution.id_mapper import EntityResolver
 
     logging.basicConfig(level=logging.INFO)
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
     ingestor = FootballDataCsvIngestor(
         store=store,

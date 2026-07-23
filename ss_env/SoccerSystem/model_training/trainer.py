@@ -464,7 +464,7 @@ if __name__ == "__main__":
     from data_storage.duckdb_store import DuckDBStore
     from feature_engineering.builder import FeatureBuilder
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     builder = FeatureBuilder(store)
 
     print("Building feature matrix...")

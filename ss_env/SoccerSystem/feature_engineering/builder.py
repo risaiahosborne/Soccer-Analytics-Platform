@@ -1,11 +1,13 @@
 """
-Feature engineering for the soccer prediction system.
+Feature engineering module for the soccer prediction system.
 
-Builds a flat feature dict (or DataFrame) for any match in the DB.
-All features are computed strictly from data BEFORE the match kickoff
-to prevent data leakage.
+This component builds a flat feature dictionary—or a full DataFrame—for any
+match stored in the database. All features are computed strictly from data
+available *before the match kickoff* to prevent data leakage and preserve
+temporal integrity.
 
-Usage:
+Typical usage
+
     from feature_engineering.builder import FeatureBuilder
     from data_storage.duckdb_store import DuckDBStore
 
@@ -18,7 +20,12 @@ Usage:
     # Full matrix for all finished matches in a league/season
     import pandas as pd
     df = builder.build_matrix(league="EPL", season="2025/2026")
+
+The builder computes targets, rolling form, head‑to‑head history, squad
+valuations, odds snapshots, weather conditions, and contextual metadata,
+producing a unified feature set suitable for model training and analysis.
 """
+
 
 from __future__ import annotations
 
@@ -35,19 +42,20 @@ logger = logging.getLogger(__name__)
 FORM_WINDOWS = [5, 10]
 
 
+def _clean_sel(sel: str) -> str:
+    """Remove dots from selection names (e.g., 'over_2.5' → 'over_25')."""
+    return sel.replace(".", "")
+
+
 class FeatureBuilder:
     def __init__(self, store: DuckDBStore) -> None:
-        self.con = store.con
+        self.con = store.conn
 
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
 
     def build(self, match_canonical_id: str) -> dict[str, Any]:
-        """
-        Build a full feature dict for one match.
-        Returns empty dict if match not found.
-        """
         match = self._get_match(match_canonical_id)
         if match is None:
             logger.warning("Match %s not found", match_canonical_id)
@@ -59,20 +67,20 @@ class FeatureBuilder:
 
         features: dict[str, Any] = {"match_canonical_id": match_canonical_id}
 
-        # --- targets (None if match not yet played) ---
+        # --- targets ---
         features.update(self._targets(match))
 
         # --- rolling form ---
         for window in FORM_WINDOWS:
-            home_overall = self._team_form(home_id, kickoff, window, venue_filter=None)
-            away_overall = self._team_form(away_id, kickoff, window, venue_filter=None)
-            home_home    = self._team_form(home_id, kickoff, window, venue_filter="home")
-            away_away    = self._team_form(away_id, kickoff, window, venue_filter="away")
+            home_overall = self._team_form(home_id, kickoff, window, None)
+            away_overall = self._team_form(away_id, kickoff, window, None)
+            home_home = self._team_form(home_id, kickoff, window, "home")
+            away_away = self._team_form(away_id, kickoff, window, "away")
 
             features.update(_prefix(home_overall, f"home_overall_l{window}"))
             features.update(_prefix(away_overall, f"away_overall_l{window}"))
-            features.update(_prefix(home_home,    f"home_home_l{window}"))
-            features.update(_prefix(away_away,    f"away_away_l{window}"))
+            features.update(_prefix(home_home, f"home_home_l{window}"))
+            features.update(_prefix(away_away, f"away_away_l{window}"))
 
         # --- head to head ---
         features.update(self._h2h(home_id, away_id, kickoff, n=5))
@@ -92,10 +100,6 @@ class FeatureBuilder:
         return features
 
     def build_matrix(self, league: str, season: str) -> pd.DataFrame:
-        """
-        Build feature matrix for all FINISHED matches in a league/season.
-        Rows are matches; columns are features.
-        """
         match_ids = self.con.execute(
             """
             SELECT canonical_id
@@ -133,9 +137,9 @@ class FeatureBuilder:
 
         if hs is None or as_ is None:
             return {
-                "target_result": None,          # "H", "D", "A"
-                "target_btts": None,             # 1 / 0
-                "target_over25": None,           # 1 / 0
+                "target_result": None,
+                "target_btts": None,
+                "target_over25": None,
                 "target_over15": None,
                 "target_over35": None,
                 "target_home_score": None,
@@ -164,24 +168,17 @@ class FeatureBuilder:
         team_id: str,
         before: datetime,
         window: int,
-        venue_filter: str | None,   # "home", "away", or None for all
+        venue_filter: str | None,
     ) -> dict[str, float | None]:
-        """
-        Rolling stats for `team_id` in the `window` matches before `before`.
-        venue_filter: "home" = only home matches, "away" = only away, None = all.
-        """
-        venue_clause = ""
-        params: list = [team_id, team_id, before.isoformat(), window]
 
         if venue_filter == "home":
-            venue_clause = "AND home_team_canonical_id = ?"
             params = [team_id, before.isoformat(), window]
-            base_query = f"""
+            base_query = """
                 SELECT
                     m.canonical_id,
-                    m.home_score  AS scored,
-                    m.away_score  AS conceded,
-                    1             AS is_home
+                    m.home_score AS scored,
+                    m.away_score AS conceded,
+                    1 AS is_home
                 FROM matches m
                 WHERE home_team_canonical_id = ?
                   AND kickoff_utc < ?
@@ -191,12 +188,12 @@ class FeatureBuilder:
             """
         elif venue_filter == "away":
             params = [team_id, before.isoformat(), window]
-            base_query = f"""
+            base_query = """
                 SELECT
                     m.canonical_id,
-                    m.away_score  AS scored,
-                    m.home_score  AS conceded,
-                    0             AS is_home
+                    m.away_score AS scored,
+                    m.home_score AS conceded,
+                    0 AS is_home
                 FROM matches m
                 WHERE away_team_canonical_id = ?
                   AND kickoff_utc < ?
@@ -205,7 +202,7 @@ class FeatureBuilder:
                 LIMIT ?
             """
         else:
-            params = [team_id, team_id, before.isoformat(), window]
+            params = [team_id, team_id, team_id, team_id, team_id, before.isoformat(), window]
             base_query = """
                 SELECT
                     m.canonical_id,
@@ -221,7 +218,6 @@ class FeatureBuilder:
                 ORDER BY kickoff_utc DESC
                 LIMIT ?
             """
-            params = [team_id, team_id, team_id, team_id, team_id, before.isoformat(), window]
 
         try:
             rows = self.con.execute(base_query, params).fetchall()
@@ -233,19 +229,18 @@ class FeatureBuilder:
             return _empty_form()
 
         match_ids = [r[0] for r in rows]
-        scored    = [r[1] for r in rows if r[1] is not None]
-        conceded  = [r[2] for r in rows if r[2] is not None]
+        scored = [r[1] for r in rows if r[1] is not None]
+        conceded = [r[2] for r in rows if r[2] is not None]
 
         n = len(rows)
-        wins   = sum(1 for s, c in zip(scored, conceded) if s > c)
-        draws  = sum(1 for s, c in zip(scored, conceded) if s == c)
+        wins = sum(1 for s, c in zip(scored, conceded) if s > c)
+        draws = sum(1 for s, c in zip(scored, conceded) if s == c)
         losses = sum(1 for s, c in zip(scored, conceded) if s < c)
-        btts   = sum(1 for s, c in zip(scored, conceded) if s > 0 and c > 0)
+        btts = sum(1 for s, c in zip(scored, conceded) if s > 0 and c > 0)
         over25 = sum(1 for s, c in zip(scored, conceded) if s + c > 2.5)
-        clean  = sum(1 for c in conceded if c == 0)
-        pts    = wins * 3 + draws
+        clean = sum(1 for c in conceded if c == 0)
+        pts = wins * 3 + draws
 
-        # xG data
         xg_stats = self._xg_for_matches(match_ids, team_id)
 
         return {
@@ -288,29 +283,20 @@ class FeatureBuilder:
     # Head to head
     # ------------------------------------------------------------------
 
-    def _h2h(
-        self,
-        home_id: str,
-        away_id: str,
-        before: datetime,
-        n: int = 5,
-    ) -> dict[str, Any]:
+    def _h2h(self, home_id: str, away_id: str, before: datetime, n: int = 5) -> dict[str, Any]:
         try:
             rows = self.con.execute(
                 """
-                SELECT
-                    home_team_canonical_id,
-                    away_team_canonical_id,
-                    home_score,
-                    away_score
+                SELECT home_team_canonical_id, away_team_canonical_id,
+                       home_score, away_score
                 FROM matches
                 WHERE (
                     (home_team_canonical_id = ? AND away_team_canonical_id = ?)
                     OR
                     (home_team_canonical_id = ? AND away_team_canonical_id = ?)
                 )
-                AND kickoff_utc < ?
-                AND status = 'finished'
+                  AND kickoff_utc < ?
+                  AND status = 'finished'
                 ORDER BY kickoff_utc DESC
                 LIMIT ?
                 """,
@@ -332,7 +318,7 @@ class FeatureBuilder:
                 continue
             tg = hs + as_
             total_goals_list.append(tg)
-            # Normalize to current home/away perspective
+
             if hid == home_id:
                 if hs > as_: home_wins += 1
                 elif hs < as_: away_wins += 1
@@ -341,8 +327,11 @@ class FeatureBuilder:
                 if as_ > hs: home_wins += 1
                 elif as_ < hs: away_wins += 1
                 else: draws += 1
-            if hs > 0 and as_ > 0: btts += 1
-            if tg > 2.5: over25 += 1
+
+            if hs > 0 and as_ > 0:
+                btts += 1
+            if tg > 2.5:
+                over25 += 1
 
         n_valid = len(total_goals_list)
         return {
@@ -359,12 +348,7 @@ class FeatureBuilder:
     # Squad value
     # ------------------------------------------------------------------
 
-    def _squad_value(
-        self, home_id: str, away_id: str, before: datetime
-    ) -> dict[str, Any]:
-        """
-        Most recent squad valuation per team before kickoff.
-        """
+    def _squad_value(self, home_id: str, away_id: str, before: datetime) -> dict[str, Any]:
         def team_value(team_id: str) -> float | None:
             try:
                 row = self.con.execute(
@@ -392,7 +376,7 @@ class FeatureBuilder:
         return {
             "home_squad_value_eur": home_val,
             "away_squad_value_eur": away_val,
-            "squad_value_ratio": ratio,          # >1 = home team richer
+            "squad_value_ratio": ratio,
         }
 
     # ------------------------------------------------------------------
@@ -400,20 +384,16 @@ class FeatureBuilder:
     # ------------------------------------------------------------------
 
     def _odds_features(self, match_canonical_id: str) -> dict[str, Any]:
-        """
-        Extract opening and closing odds for 1X2, over/under 2.5, and BTTS.
-        Uses the best available price across all bookmakers.
-        """
         features: dict[str, Any] = {}
 
         for timing, is_flag in [("opening", "is_opening"), ("closing", "is_closing")]:
             for market, selections in [
-                ("1x2",         ["home", "draw", "away"]),
-                ("over_under",  ["over_2.5", "under_2.5"]),
-                ("btts",        ["yes", "no"]),
+                ("1x2", ["home", "draw", "away"]),
+                ("over_under", ["over_2.5", "under_2.5"]),
+                ("btts", ["yes", "no"]),
             ]:
                 for sel in selections:
-                    key = f"odds_{timing}_{market}_{sel.replace('.', '').replace('_', '_')}"
+                    key = f"odds_{timing}_{market}_{_clean_sel(sel)}"
                     try:
                         row = self.con.execute(
                             f"""
@@ -430,22 +410,24 @@ class FeatureBuilder:
                     except Exception:
                         features[key] = None
 
-        # Implied probabilities from closing 1X2
+        # implied probabilities
         for sel, label in [("home", "home"), ("draw", "draw"), ("away", "away")]:
             odds_key = f"odds_closing_1x2_{sel}"
             prob_key = f"implied_prob_closing_{label}"
             o = features.get(odds_key)
             features[prob_key] = round(1 / o, 4) if o and o > 0 else None
 
-        # Line movement: closing minus opening (positive = odds drifted out)
+        # line movement (closing - opening)
         for market, sel in [
-            ("1x2", "home"), ("1x2", "draw"), ("1x2", "away"),
+            ("1x2", "home"),
+            ("1x2", "draw"),
+            ("1x2", "away"),
             ("over_under", "over_25"),
         ]:
-            sel_clean = sel.replace(".", "").replace("_", "_")
-            open_key  = f"odds_opening_{market}_{sel_clean}"
+            sel_clean = _clean_sel(sel)
+            open_key = f"odds_opening_{market}_{sel_clean}"
             close_key = f"odds_closing_{market}_{sel_clean}"
-            move_key  = f"odds_movement_{market}_{sel_clean}"
+            move_key = f"odds_movement_{market}_{sel_clean}"
             o = features.get(open_key)
             c = features.get(close_key)
             features[move_key] = round(c - o, 4) if o and c else None
@@ -489,13 +471,7 @@ class FeatureBuilder:
     # Context
     # ------------------------------------------------------------------
 
-    def _context(
-        self,
-        home_id: str,
-        away_id: str,
-        kickoff: datetime,
-        match: dict,
-    ) -> dict[str, Any]:
+    def _context(self, home_id: str, away_id: str, kickoff: datetime, match: dict) -> dict[str, Any]:
         return {
             "matchday": match.get("matchday"),
             "is_weekend": int(kickoff.weekday() >= 5),
@@ -536,8 +512,8 @@ class FeatureBuilder:
             row = self.con.execute(
                 """
                 SELECT canonical_id, kickoff_utc, status,
-                       home_team_canonical_id, away_team_canonical_id,
-                       home_score, away_score, matchday, competition, season
+                    home_team_canonical_id, away_team_canonical_id,
+                    home_score, away_score, matchday, competition, season
                 FROM matches
                 WHERE canonical_id = ?
                 """,
@@ -557,26 +533,19 @@ class FeatureBuilder:
         ]
         d = dict(zip(keys, row))
 
-        # Ensure kickoff is a datetime object
         if isinstance(d["kickoff_utc"], str):
             d["kickoff_utc"] = datetime.fromisoformat(d["kickoff_utc"])
 
         return d
 
-
 # ------------------------------------------------------------------
-# Module-level helpers
+# Modular Helpers
 # ------------------------------------------------------------------
-
-def _prefix(d: dict, prefix: str) -> dict:
-    return {f"{prefix}__{k}": v for k, v in d.items()}
-
 
 def _safe_div(a, b) -> float | None:
     if a is None or b is None or b == 0:
         return None
     return round(a / b, 4)
-
 
 def _empty_form() -> dict:
     return {
@@ -594,8 +563,6 @@ def _empty_form() -> dict:
         "xga_avg": None,
         "npxg_avg": None,
     }
-
-
 def _empty_h2h() -> dict:
     return {
         "h2h_matches": 0,
@@ -606,3 +573,6 @@ def _empty_h2h() -> dict:
         "h2h_btts_rate": None,
         "h2h_over25_rate": None,
     }
+
+def _prefix(d: dict, prefix: str) -> dict:
+    return {f"{prefix}__{k}": v for k, v in d.items()}
