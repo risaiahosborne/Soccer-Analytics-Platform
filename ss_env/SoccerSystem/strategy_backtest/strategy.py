@@ -215,13 +215,13 @@ class ValueBetFinder:
         return bets
 
     def adjust_for_simultaneous(self, bets: list[ValueBet], bankroll: float) -> list[ValueBet]:
-    """
-    When multiple bets land on the same matchday, scale stakes down
-    so total exposure stays within max_stake_pct * n_bets constraint.
+        """
+        When multiple bets land on the same matchday, scale stakes down
+        so total exposure stays within max_stake_pct * n_bets constraint.
 
-    Simple approach: if total fractional stake > 50% of bankroll,
-    scale all stakes proportionally.
-    """
+        Simple approach: if total fractional stake > 50% of bankroll,
+        scale all stakes proportionally.
+        """
         if not bets:
             return bets
 
