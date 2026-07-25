@@ -233,25 +233,13 @@ class ValueBetFinder:
 
         scale = max_total / total_fraction
         adjusted = []
+
         for b in bets:
             new_sf = round(b.stake_fraction * scale, 6)
             new_amount = round(new_sf * bankroll, 2)
-            adjusted.append(ValueBet(
-                match_canonical_id=b.match_canonical_id,
-                kickoff_utc=b.kickoff_utc,
-                market=b.market,
-                selection=b.selection,
-                model_prob=b.model_prob,
-                decimal_odds=b.decimal_odds,
-                bookmaker=b.bookmaker,
-                edge=b.edge,
-                full_kelly=b.full_kelly,
-                stake_fraction=new_sf,
-                stake_amount=new_amount,
-                bankroll_at_bet=bankroll,
-            ))
-        return adjusted
+            adjusted.append(_adjust_valuebet(b, new_sf, new_amount, bankroll))
 
+        return adjusted
 
 # ------------------------------------------------------------------
 # Backtester
@@ -457,6 +445,37 @@ class Backtester:
 # ------------------------------------------------------------------
 # Internal helpers
 # ------------------------------------------------------------------
+def _adjust_valuebet(b: ValueBet, new_sf: float, new_amount: float, bankroll: float) -> ValueBet:
+    """
+    Deduplicated constructor wrapper for ValueBet stake adjustments.
+    Preserves exact field semantics and behavior.
+    """
+    return ValueBet(
+        match_canonical_id=b.match_canonical_id,
+        kickoff_utc=b.kickoff_utc,
+        market=b.market,
+        selection=b.selection,
+        model_prob=b.model_prob,
+        decimal_odds=b.decimal_odds,
+        bookmaker=b.bookmaker,
+        edge=b.edge,
+        full_kelly=b.full_kelly,
+        stake_fraction=new_sf,
+        stake_amount=new_amount,
+        bankroll_at_bet=bankroll,
+    )
+
+def _adjust_result(r, stake: float, stake_return: float, profit: float):
+    """
+    Deduplicated wrapper around dataclasses.replace.
+    Preserves exact behavior and field semantics.
+    """
+    return dataclasses.replace(
+        r,
+        stake=stake,
+        stake_return=stake_return,
+        profit=profit,
+    )
 
 def _extract_model_probs(row: pd.Series) -> dict[str, float]:
     probs = {}

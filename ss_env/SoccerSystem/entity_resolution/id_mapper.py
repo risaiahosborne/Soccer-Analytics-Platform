@@ -357,7 +357,7 @@ class EntityResolver:
  
 if __name__ == "__main__":
     # smoke test: same team, two sources, different spellings -> should merge
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
  
     r1 = resolver.resolve_team("football-data.org", "66", "Manchester United FC",

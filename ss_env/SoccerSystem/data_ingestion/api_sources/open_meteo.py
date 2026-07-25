@@ -146,7 +146,7 @@ if __name__ == "__main__":
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     from data_storage.duckdb_store import DuckDBStore
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
 
     # Old Trafford coordinates, a date safely in the past so the Archive API is used
     test_matches = [{
