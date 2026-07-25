@@ -125,3 +125,12 @@ Re-run weather ingestor against all 380 matches
 Investigate squad valuation linking
 Re-run quality checks
 Test build_matrix() end to end
+
+
+feature importance plots
+
+odds vs probability scatterplots
+
+multi‑season selectors
+
+model comparison pages
