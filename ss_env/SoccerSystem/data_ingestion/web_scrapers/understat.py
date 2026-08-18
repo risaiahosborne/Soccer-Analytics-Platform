@@ -37,24 +37,24 @@ Response structure:
       ...
     }
 
-Each history entry is one match for that team.  The same match appears
+Each history entry is one match for that team. The same match appears
 twice in the full payload (once for each side), so we emit two XGRecord
 rows per match — one per team — which is exactly what the schema intends.
 
 Linking to canonical matches:
-    We look up the canonical match by team name + date (±12 h window) using
-    the same approach as the_odds_api.py.  Matches for the requested
-    league/season must already be ingested via football_data_org.py before
+    We look up the canonical match by team canonical_id + date (±12 h window)
+    using the same approach as the odds ingestors. Matches for the requested
+    league/season must already be ingested via football-data CSV before
     running this ingestor.
 """
 
 from __future__ import annotations
 
 import logging
-import time
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Dict, List
 
+import requests
 
 from data_ingestion.base import Ingestor, IngestionResult
 from data_normalization.schemas import XGRecord
@@ -63,7 +63,7 @@ from entity_resolution.id_mapper import EntityResolver
 
 logger = logging.getLogger(__name__)
 
-# Understat league slug → football-data.org / canonical name
+# Understat league slug → canonical league name
 LEAGUE_SLUGS: dict[str, str] = {
     "EPL": "EPL",
     "La_liga": "La_liga",
@@ -73,8 +73,6 @@ LEAGUE_SLUGS: dict[str, str] = {
     "RFPL": "RFPL",
 }
 
-# Be polite — Understat is a free community resource
-
 
 class UnderstatIngestor(Ingestor):
     """
@@ -82,6 +80,8 @@ class UnderstatIngestor(Ingestor):
     league and season start year.
 
     Usage:
+        store = DuckDBStore("data/soccer_smoketest.duckdb")
+        resolver = EntityResolver(store)
         ingestor = UnderstatIngestor(
             store=store,
             resolver=resolver,
@@ -114,26 +114,43 @@ class UnderstatIngestor(Ingestor):
     # BaseIngestor interface
     # ------------------------------------------------------------------
 
-    def fetch(self) -> dict[str, Any]:
-        import json, re, requests
+    def fetch(self) -> Dict[str, Any]:
+        import json
+        import re
+
         url = f"https://understat.com/league/{self.league}/{self.season_start_year}"
         logger.info("GET %s", url)
-        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        headers = {
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36"
+            )
+        }
         resp = requests.get(url, headers=headers, timeout=30)
         resp.raise_for_status()
+
         # Understat embeds JSON as hex-escaped strings inside JSON.parse() calls
         matches = re.findall(r"JSON\.parse\('(.*?)'\)", resp.text)
         if not matches:
             raise ValueError("Could not find JSON.parse() in Understat page")
+
         # Find the teamsData block — it contains team objects with "history" keys
         for raw in matches:
             try:
-                decoded = raw.encode().decode("raw_unicode_escape").encode("raw_unicode_escape").decode("unicode_escape")
+                decoded = (
+                    raw.encode()
+                    .decode("raw_unicode_escape")
+                    .encode("raw_unicode_escape")
+                    .decode("unicode_escape")
+                )
                 data = json.loads(decoded)
-                if isinstance(data, dict) and any("history" in str(v) for v in list(data.values())[:1]):
+                if isinstance(data, dict) and any(
+                    "history" in str(v) for v in list(data.values())[:1]
+                ):
                     return data
             except Exception:
                 continue
+
         # Fallback: try direct hex decode on all matches
         for raw in matches:
             try:
@@ -143,14 +160,15 @@ class UnderstatIngestor(Ingestor):
                     return data
             except Exception:
                 continue
+
         raise ValueError("Could not decode teamsData from Understat page")
 
-    def transform(self, raw: dict[str, Any]) -> list[XGRecord]:
-        records: list[XGRecord] = []
+    def transform(self, raw: Dict[str, Any]) -> List[XGRecord]:
+        records: List[XGRecord] = []
 
         for team_id_str, team_data in raw.items():
             team_name: str = team_data.get("title", "")
-            history: list[dict] = team_data.get("history", [])
+            history: List[dict] = team_data.get("history", [])
 
             if not team_name:
                 logger.warning("Team entry %s missing 'title', skipping", team_id_str)
@@ -161,8 +179,9 @@ class UnderstatIngestor(Ingestor):
                 source=self.source_name,
                 source_id=team_id_str,
                 name=team_name,
+                league=LEAGUE_SLUGS.get(self.league),
             )
-            if team_resolution is None:
+            if team_resolution is None or team_resolution.canonical_id is None:
                 logger.warning(
                     "Could not resolve team '%s' (id=%s), skipping its history",
                     team_name,
@@ -189,7 +208,6 @@ class UnderstatIngestor(Ingestor):
                     npxg=_safe_float(entry.get("npxG")),
                     xga=_safe_float(entry.get("xGA")),
                     # Understat history entries don't include shot counts
-                    # at the team-history level; leave as None.
                     shots=None,
                     shots_on_target=None,
                     possession_pct=None,
@@ -198,7 +216,7 @@ class UnderstatIngestor(Ingestor):
 
         return records
 
-    def validate_raw(self, raw: dict[str, Any]) -> bool:
+    def validate_raw(self, raw: Dict[str, Any]) -> bool:
         if not raw:
             logger.error("Understat returned empty payload")
             return False
@@ -213,7 +231,7 @@ class UnderstatIngestor(Ingestor):
         return True
 
     def run(self) -> IngestionResult:
-        errors: list[str] = []
+        errors: List[str] = []
         records_fetched = 0
         records_stored = 0
 
@@ -347,3 +365,25 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+if __name__ == "__main__":
+    import logging as _logging
+
+    _logging.basicConfig(level=_logging.INFO)
+
+    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    resolver = EntityResolver(store)
+
+    ingestor = UnderstatIngestor(
+        store=store,
+        resolver=resolver,
+        league="EPL",
+        season_start_year=2025,
+    )
+
+    result = ingestor.run()
+    print(result)
+    print("Total xG records:", store.table_row_count("xg_records"))
+
+    store.close()

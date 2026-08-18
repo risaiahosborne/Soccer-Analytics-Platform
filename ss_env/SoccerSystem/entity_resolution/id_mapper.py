@@ -90,42 +90,18 @@ def normalize_name(name: str) -> str:
 # Extra DDL for tables this module owns (beyond the core schema tables).
 _EXTRA_DDL = """
 CREATE TABLE IF NOT EXISTS canonical_teams (
-    canonical_id    VARCHAR PRIMARY KEY,
-    display_name    VARCHAR NOT NULL,
-    normalized_name VARCHAR NOT NULL,
-    country         VARCHAR,
-    league          VARCHAR,
-    created_at      TIMESTAMP DEFAULT current_timestamp
+    canonical_id      VARCHAR PRIMARY KEY,
+    display_name      VARCHAR NOT NULL,     -- Full team name (Manchester United FC)
+    short_name        VARCHAR,              -- Short display name (Man United)
+    normalized_name   VARCHAR NOT NULL,     -- ML-friendly name (manchester_united)
+    country           VARCHAR,              -- England, Spain, Germany...
+    league            VARCHAR,              -- EPL, La Liga, Bundesliga...
+    team_code         VARCHAR,              -- Optional: MUN, ARS, LIV
+    stadium           VARCHAR,              -- Optional: Old Trafford
+    city              VARCHAR,              -- Optional: Manchester
+    created_at        TIMESTAMP DEFAULT current_timestamp
 );
- 
-CREATE TABLE IF NOT EXISTS canonical_players (
-    canonical_id    VARCHAR PRIMARY KEY,
-    display_name    VARCHAR NOT NULL,
-    normalized_name VARCHAR NOT NULL,
-    date_of_birth   DATE,
-    created_at      TIMESTAMP DEFAULT current_timestamp
-);
- 
-CREATE TABLE IF NOT EXISTS manual_overrides (
-    entity_type     VARCHAR NOT NULL,
-    source          VARCHAR NOT NULL,
-    source_id       VARCHAR NOT NULL,
-    canonical_id    VARCHAR NOT NULL,
-    PRIMARY KEY (entity_type, source, source_id)
-);
- 
-CREATE TABLE IF NOT EXISTS entity_review_queue (
-    review_id           VARCHAR PRIMARY KEY,
-    entity_type          VARCHAR NOT NULL,
-    source                VARCHAR NOT NULL,
-    source_id             VARCHAR NOT NULL,
-    candidate_name          VARCHAR NOT NULL,
-    candidate_canonical_id  VARCHAR NOT NULL,
-    candidate_display_name  VARCHAR NOT NULL,
-    match_score                DOUBLE NOT NULL,
-    status                       VARCHAR NOT NULL DEFAULT 'pending',  -- pending|approved|rejected
-    created_at                    TIMESTAMP DEFAULT current_timestamp
-);
+
 """
  
  
@@ -336,14 +312,39 @@ class EntityResolver:
             [str(uuid.uuid4()), entity_type, source, source_id, name, cand_id, cand_name, score],
         )
  
-    def _create_canonical_team(self, display_name, norm, country, league) -> str:
+    def _create_canonical_team(self, display_name, norm, country, league,
+                            short_name=None, team_code=None,
+                            stadium=None, city=None) -> str:
         new_id = f"team_{uuid.uuid4().hex[:12]}"
         self.store.conn.execute(
-            "INSERT INTO canonical_teams (canonical_id, display_name, normalized_name, country, league) "
-            "VALUES (?, ?, ?, ?, ?)",
-            [new_id, display_name, norm, country, league],
+            """
+            INSERT INTO canonical_teams (
+                canonical_id,
+                display_name,
+                short_name,
+                normalized_name,
+                country,
+                league,
+                team_code,
+                stadium,
+                city
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                new_id,
+                display_name,
+                short_name,
+                norm,
+                country,
+                league,
+                team_code,
+                stadium,
+                city,
+            ],
         )
         return new_id
+
  
     def _create_canonical_player(self, display_name, norm, dob) -> str:
         new_id = f"player_{uuid.uuid4().hex[:12]}"
