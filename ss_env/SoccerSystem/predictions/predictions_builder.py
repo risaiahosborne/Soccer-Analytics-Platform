@@ -22,8 +22,8 @@ from typing import Dict, Any
 
 import pandas as pd
 
-from data_storage.duckdb_store import DuckDBStore
-from feature_engineering.builder import FeatureBuilder
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.feature_engineering.builder import FeatureBuilder
 
 logger = logging.getLogger(__name__)
 

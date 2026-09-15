@@ -43,9 +43,9 @@ from typing import Any, Optional
 
 import requests
 
-from data_ingestion.base import Ingestor, IngestionResult
-from data_normalization.schemas import OddsSnapshot, OddsMarket
-from entity_resolution.id_mapper import EntityResolver
+from ss_env.SoccerSystem.data_ingestion.base import Ingestor, IngestionResult
+from ss_env.SoccerSystem.data_normalization.schemas import OddsSnapshot, OddsMarket
+from ss_env.SoccerSystem.entity_resolution.id_mapper import EntityResolver
 
 logger = logging.getLogger(__name__)
 

@@ -30,12 +30,14 @@ from typing import Any
 import joblib
 import numpy as np
 import pandas as pd
+
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import accuracy_score, brier_score_loss, log_loss
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, StandardScaler
 from sklearn.impute import SimpleImputer
+
 import lightgbm as lgb
 
 warnings.filterwarnings("ignore")
@@ -61,7 +63,7 @@ DROP_COLS = [
 
 N_CV_SPLITS = 5
 TEST_SIZE = 0.20
-SAVED_MODELS_DIR = Path("model_training/saved_models")
+SAVED_MODELS_DIR = Path("/workspaces/Soccer-App-1/model_training/saved_models")
 
 # ------------------------------------------------------------------
 # Feature preparation
@@ -87,6 +89,7 @@ def prepare_features(df: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
 def get_target(df: pd.DataFrame, target_name: str) -> pd.Series:
     cfg = TARGETS[target_name]
     y = df[cfg["col"]].copy()
+   
     if cfg["type"] == "multiclass":
         mapping = {"H": 0, "D": 1, "A": 2}
         y = y.map(mapping)
@@ -161,10 +164,9 @@ def get_models(target_type: str) -> dict[str, Any]:
     return models
 
 
-def load_best_model(target_name: str):
-    path = SAVED_MODELS_DIR / f"{target_name}_model.pkl"
-    info = joblib.load(path)
-    return info["model"]
+def _clone_model(model):
+    import copy
+    return copy.deepcopy(model)
 
 # ------------------------------------------------------------------
 # Evaluation
@@ -228,11 +230,6 @@ def evaluate_holdout(model, X_train, y_train, X_test, y_test, target_type):
 
     return result
 
-
-def _clone_model(model):
-    import copy
-    return copy.deepcopy(model)
-
 # ------------------------------------------------------------------
 # Trainer
 # ------------------------------------------------------------------
@@ -241,10 +238,12 @@ class ModelTrainer:
     def __init__(self, df: pd.DataFrame) -> None:
         self.df = df.dropna(subset=["target_result", "target_btts", "target_over25"])
         self.df = self.df.sort_values("matchday").reset_index(drop=True)
+
         self.X, self.encoders = prepare_features(self.df)
 
         split_idx = int(len(self.df) * (1 - TEST_SIZE))
         self.split_idx = split_idx
+
         self.X_train = self.X.iloc[:split_idx]
         self.X_test = self.X.iloc[split_idx:]
 
@@ -269,7 +268,9 @@ class ModelTrainer:
 
                 cv_metrics = evaluate_cv(model, self.X_train, y_train, cfg["type"])
                 test_model = _clone_model(model)
-                test_metrics = evaluate_holdout(test_model, self.X_train, y_train, self.X_test, y_test, cfg["type"])
+                test_metrics = evaluate_holdout(
+                    test_model, self.X_train, y_train, self.X_test, y_test, cfg["type"]
+                )
 
                 rows.append({"model": model_name, **cv_metrics, **test_metrics})
 
@@ -282,20 +283,17 @@ class ModelTrainer:
             best_model = _clone_model(models[best_name])
             best_model.fit(self.X_train, y_train)
 
-            self.best_models[target_name] = {
-                "name": best_name,
-                "model": best_model,
-                "target_type": cfg["type"],
-                "classes": cfg["classes"],
-            }
+            # ✔ Save actual model (not dict)
+            self.best_models[target_name] = best_model
 
         return self.results
 
     def save_best_models(self):
         SAVED_MODELS_DIR.mkdir(parents=True, exist_ok=True)
-        for target_name, info in self.best_models.items():
+
+        for target_name, model in self.best_models.items():
             path = SAVED_MODELS_DIR / f"{target_name}_model.pkl"
-            joblib.dump(info, path)
+            joblib.dump(model, path)
             logger.info("Saved %s model → %s", target_name, path)
 
 # ------------------------------------------------------------------
@@ -303,11 +301,8 @@ class ModelTrainer:
 # ------------------------------------------------------------------
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-
-    from data_storage.duckdb_store import DuckDBStore
-    from feature_engineering.builder import FeatureBuilder
-    from predictions.predictions_builder import PredictionsBuilder
+    from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
+    from ss_env.SoccerSystem.feature_engineering.builder import FeatureBuilder
 
     store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     builder = FeatureBuilder(store)
@@ -316,17 +311,9 @@ if __name__ == "__main__":
     df = builder.build_matrix("Premier League", "2025/2026")
     print(f"Matrix: {len(df)} rows × {len(df.columns)} columns")
 
-    # 1. Train models
     trainer = ModelTrainer(df)
     trainer.run()
     trainer.save_best_models()
 
-    # 2. Generate predictions using best RESULT model
-    best_result_model = load_best_model("result")
-    pred_builder = PredictionsBuilder(store, best_result_model)
-
-    pred_df = pred_builder.predict_all("Premier League", "2025/2026")
-    pred_builder.write_predictions(pred_df)
-
-    print("Predictions written to DuckDB.")
+    print("Training complete.")
     store.close()

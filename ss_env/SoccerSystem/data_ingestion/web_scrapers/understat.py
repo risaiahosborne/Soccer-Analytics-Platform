@@ -56,10 +56,10 @@ from typing import Any, Dict, List
 
 import requests
 
-from data_ingestion.base import Ingestor, IngestionResult
-from data_normalization.schemas import XGRecord
-from data_storage.duckdb_store import DuckDBStore
-from entity_resolution.id_mapper import EntityResolver
+from ss_env.SoccerSystem.data_ingestion.base import Ingestor, IngestionResult
+from ss_env.SoccerSystem.data_normalization.schemas import XGRecord
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.entity_resolution.id_mapper import EntityResolver
 
 logger = logging.getLogger(__name__)
 
@@ -372,7 +372,7 @@ if __name__ == "__main__":
 
     _logging.basicConfig(level=_logging.INFO)
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
 
     ingestor = UnderstatIngestor(

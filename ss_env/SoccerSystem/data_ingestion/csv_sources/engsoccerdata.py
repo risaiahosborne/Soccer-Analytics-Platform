@@ -8,10 +8,10 @@ from typing import Any
 import pandas as pd
 import requests
 
-from data_ingestion.base import Ingestor, IngestionResult
-from data_normalization.schemas import Match, MatchStatus, Team
-from data_storage.duckdb_store import DuckDBStore
-from entity_resolution.id_mapper import EntityResolver, normalize_name
+from ss_env.SoccerSystem.data_ingestion.base import Ingestor, IngestionResult
+from ss_env.SoccerSystem.data_normalization.schemas import Match, MatchStatus, Team
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.entity_resolution.id_mapper import EntityResolver, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +265,7 @@ if __name__ == "__main__":
     from data_storage.duckdb_store import DuckDBStore
     from entity_resolution.id_mapper import EntityResolver
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
     ingestor = EngSoccerDataIngestor(store, resolver, seasons=[2020, 2021])
     result = ingestor.run()

@@ -21,9 +21,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from data_ingestion.base import Ingestor
-from data_normalization.schemas import WeatherRecord
-from data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.data_ingestion.base import Ingestor
+from ss_env.SoccerSystem.data_normalization.schemas import WeatherRecord
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"

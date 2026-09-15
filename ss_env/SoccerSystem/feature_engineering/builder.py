@@ -30,12 +30,12 @@ producing a unified feature set suitable for model training and analysis.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pandas as pd
 
-from data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +102,7 @@ class FeatureBuilder:
         features.update(self._implied_probabilities(odds))
 
         # --- volatility ---
-        features.update(self._volatility(odds))
+        features.update(self._volatility(features))
 
         # --- EV + Kelly ---
         features.update(self._ev_kelly(odds, features))
@@ -112,6 +112,99 @@ class FeatureBuilder:
 
         # --- context ---
         features.update(self._context(home_id, away_id, kickoff, match))
+
+        return features
+    def build_for_fixture(
+        self,
+        home_team_id: str,
+        away_team_id: str,
+        kickoff: datetime,
+        competition: str | None = None,
+        season: str | None = None,
+        match_canonical_id: str | None = None,
+    ) -> dict[str, Any]:
+        """
+        Build features for a FUTURE fixture (no scores yet).
+
+        Uses only data BEFORE the given kickoff:
+        - past matches
+        - team form
+        - head-to-head
+        - squad valuations
+        - odds snapshots (if any exist before kickoff)
+        - context (rest days)
+        - weather (if pre-fetched)
+        """
+
+        features: dict[str, Any] = {}
+
+        if match_canonical_id:
+            features["match_canonical_id"] = match_canonical_id
+
+        # --- team metadata ---
+        features.update(self._team_metadata(home_team_id, prefix="home"))
+        features.update(self._team_metadata(away_team_id, prefix="away"))
+
+        # --- match metadata (no scores, no status) ---
+        features.update({
+            "competition": competition,
+            "season": season,
+            "kickoff_hour": kickoff.hour,
+            "kickoff_weekday": kickoff.weekday(),
+            "is_weekend": int(kickoff.weekday() >= 5),
+            "matchday": None,  # can be filled later if you have it
+        })
+
+        # --- NO targets for future fixtures ---
+        features.update({
+            "target_result": None,
+            "target_btts": None,
+            "target_over25": None,
+            "target_home_score": None,
+            "target_away_score": None,
+            "target_total_goals": None,
+        })
+
+        # --- rolling form ---
+        for window in FORM_WINDOWS:
+            home_overall = self._team_form(home_team_id, kickoff, window, None)
+            away_overall = self._team_form(away_team_id, kickoff, window, None)
+            home_home = self._team_form(home_team_id, kickoff, window, "home")
+            away_away = self._team_form(away_team_id, kickoff, window, "away")
+
+            features.update(_prefix(home_overall, f"home_overall_l{window}"))
+            features.update(_prefix(away_overall, f"away_overall_l{window}"))
+            features.update(_prefix(home_home, f"home_home_l{window}"))
+            features.update(_prefix(away_away, f"away_away_l{window}"))
+
+        # --- head to head ---
+        features.update(self._h2h(home_team_id, away_team_id, kickoff, n=5))
+
+        # --- squad value ---
+        features.update(self._squad_value(home_team_id, away_team_id, kickoff))
+
+        # --- odds (if any pre-match odds exist) ---
+        if match_canonical_id:
+            odds = self._odds_features(match_canonical_id)
+        else:
+            odds = {}
+        features.update(odds)
+
+        # --- implied probabilities ---
+        features.update(self._implied_probabilities(odds))
+
+        # --- volatility ---
+        features.update(self._volatility(features))
+
+        # --- EV + Kelly (only if odds exist) ---
+        features.update(self._ev_kelly(odds, features))
+
+        # --- weather (if pre-fetched for this fixture) ---
+        if match_canonical_id:
+            features.update(self._weather(match_canonical_id))
+
+        # --- context (rest days, etc.) ---
+        features.update(self._context(home_team_id, away_team_id, kickoff, match={}))
 
         return features
 
@@ -182,6 +275,7 @@ class FeatureBuilder:
             "kickoff_hour": match["kickoff_utc"].hour,
             "kickoff_weekday": match["kickoff_utc"].weekday(),
             "is_weekend": int(match["kickoff_utc"].weekday() >= 5),
+            "matchday": match.get("matchday"),
         }
 
     # ------------------------------------------------------------------
@@ -217,12 +311,111 @@ class FeatureBuilder:
     # ------------------------------------------------------------------
 
     def _team_form(self, team_id: str, before: datetime, window: int, venue_filter: str | None):
-        # (unchanged from your version)
-        # ...
+        """
+        Compute rolling form for a team before a given kickoff time.
+        window = number of past matches to include
+        venue_filter = None | "home" | "away"
+        """
+        params = [team_id, team_id, before]
 
-        # I keep your logic exactly as-is — it’s already excellent.
+        if venue_filter == "home":
+            params = [team_id, before]
+            sql = f"""
+                SELECT home_score, away_score
+                FROM matches
+                WHERE home_team_canonical_id = ?
+                  AND kickoff_utc < ?
+                  AND status = 'finished'
+                ORDER BY kickoff_utc DESC
+                LIMIT {window}
+            """
+        elif venue_filter == "away":
+            params = [team_id, before]
+            sql = f"""
+                SELECT home_score, away_score
+                FROM matches
+                WHERE away_team_canonical_id = ?
+                  AND kickoff_utc < ?
+                  AND status = 'finished'
+                ORDER BY kickoff_utc DESC
+                LIMIT {window}
+            """
+        else:
+            sql = f"""
+                SELECT home_score, away_score,
+                       home_team_canonical_id, away_team_canonical_id
+                FROM matches
+                WHERE (home_team_canonical_id = ? OR away_team_canonical_id = ?)
+                  AND kickoff_utc < ?
+                  AND status = 'finished'
+                ORDER BY kickoff_utc DESC
+                LIMIT {window}
+            """
 
-        # (Full code omitted here for brevity — your original logic stays untouched)
+        rows = self.con.execute(sql, params).fetchall()
+
+        if not rows:
+            return {
+                "wins": 0,
+                "draws": 0,
+                "losses": 0,
+                "goals_for": 0,
+                "goals_against": 0,
+                "points": 0,
+            }
+
+        wins = draws = losses = gf = ga = 0
+
+        for r in rows:
+            if venue_filter in ("home", "away"):
+                home_score, away_score = r
+                if venue_filter == "home":
+                    gf += home_score
+                    ga += away_score
+                    if home_score > away_score:
+                        wins += 1
+                    elif home_score == away_score:
+                        draws += 1
+                    else:
+                        losses += 1
+                else:
+                    gf += away_score
+                    ga += home_score
+                    if away_score > home_score:
+                        wins += 1
+                    elif away_score == home_score:
+                        draws += 1
+                    else:
+                        losses += 1
+            else:
+                home_score, away_score, home_id, away_id = r
+                if home_id == team_id:
+                    gf += home_score
+                    ga += away_score
+                    if home_score > away_score:
+                        wins += 1
+                    elif home_score == away_score:
+                        draws += 1
+                    else:
+                        losses += 1
+                else:
+                    gf += away_score
+                    ga += home_score
+                    if away_score > home_score:
+                        wins += 1
+                    elif away_score == home_score:
+                        draws += 1
+                    else:
+                        losses += 1
+
+        form_dict = {
+            "wins": wins,
+            "draws": draws,
+            "losses": losses,
+            "goals_for": gf,
+            "goals_against": ga,
+            "points": wins * 3 + draws,
+        }
 
         return form_dict
 
@@ -231,23 +424,148 @@ class FeatureBuilder:
     # ------------------------------------------------------------------
 
     def _h2h(self, home_id: str, away_id: str, before: datetime, n: int = 5):
-        # (unchanged — your logic is correct)
-        return h2h_dict
+        """
+        Head-to-head record between two teams before a given kickoff.
+        """
+        rows = self.con.execute(
+            f"""
+            SELECT home_team_canonical_id, away_team_canonical_id,
+                   home_score, away_score
+            FROM matches
+            WHERE status = 'finished'
+              AND kickoff_utc < ?
+              AND (
+                    (home_team_canonical_id = ? AND away_team_canonical_id = ?)
+                 OR (home_team_canonical_id = ? AND away_team_canonical_id = ?)
+              )
+            ORDER BY kickoff_utc DESC
+            LIMIT {n}
+            """,
+            [before, home_id, away_id, away_id, home_id],
+        ).fetchall()
+
+        if not rows:
+            return {
+                "h2h_matches": 0,
+                "h2h_home_wins": 0,
+                "h2h_away_wins": 0,
+                "h2h_draws": 0,
+                "h2h_home_goals_for": 0,
+                "h2h_home_goals_against": 0,
+                "h2h_away_goals_for": 0,
+                "h2h_away_goals_against": 0,
+            }
+
+        home_wins = away_wins = draws = 0
+        hgf = hga = agf = aga = 0
+
+        for h_id, a_id, hs, as_ in rows:
+            if h_id == home_id:
+                hgf += hs
+                hga += as_
+                agf += as_
+                aga += hs
+                if hs > as_:
+                    home_wins += 1
+                elif hs < as_:
+                    away_wins += 1
+                else:
+                    draws += 1
+            else:
+                hgf += as_
+                hga += hs
+                agf += hs
+                aga += as_
+                if as_ > hs:
+                    home_wins += 1
+                elif as_ < hs:
+                    away_wins += 1
+                else:
+                    draws += 1
+
+        return {
+            "h2h_matches": len(rows),
+            "h2h_home_wins": home_wins,
+            "h2h_away_wins": away_wins,
+            "h2h_draws": draws,
+            "h2h_home_goals_for": hgf,
+            "h2h_home_goals_against": hga,
+            "h2h_away_goals_for": agf,
+            "h2h_away_goals_against": aga,
+        }
 
     # ------------------------------------------------------------------
     # Squad value
     # ------------------------------------------------------------------
 
     def _squad_value(self, home_id: str, away_id: str, before: datetime):
-        # (unchanged — your logic is correct)
-        return squad_dict
+        """
+        Latest squad valuation for each team before kickoff.
+        Uses valuation_date instead of captured_at.
+        """
+
+        rows = self.con.execute(
+            """
+            SELECT team_canonical_id, market_value, currency, valuation_date
+            FROM squad_valuations
+            WHERE team_canonical_id IN (?, ?)
+            AND valuation_date <= ?
+            ORDER BY valuation_date DESC
+            """,
+            [home_id, away_id, before],
+        ).fetchall()
+
+        home_val = away_val = None
+        home_cur = away_cur = None
+
+        for team_id, value, currency, vdate in rows:
+            if team_id == home_id and home_val is None:
+                home_val = value
+                home_cur = currency
+            elif team_id == away_id and away_val is None:
+                away_val = value
+                away_cur = currency
+
+        return {
+            "home_squad_value": home_val,
+            "home_squad_currency": home_cur,
+            "away_squad_value": away_val,
+            "away_squad_currency": away_cur,
+            "squad_value_diff": (
+                home_val - away_val if home_val is not None and away_val is not None else None
+            ),
+        }
 
     # ------------------------------------------------------------------
     # Odds features
     # ------------------------------------------------------------------
 
     def _odds_features(self, match_canonical_id: str) -> dict[str, Any]:
-        # (unchanged — your logic is correct)
+        """
+        Closing 1x2 odds per selection; fallback to latest snapshot if no closing flag.
+        """
+        rows = self.con.execute(
+            """
+            SELECT market, selection, price_decimal, is_opening, is_closing, captured_at
+            FROM odds_snapshots
+            WHERE match_canonical_id = ?
+              AND market = '1x2'
+            ORDER BY is_closing DESC, captured_at DESC
+            """,
+            [match_canonical_id],
+        ).fetchall()
+
+        odds_dict: dict[str, Any] = {
+            "odds_closing_1x2_home": None,
+            "odds_closing_1x2_draw": None,
+            "odds_closing_1x2_away": None,
+        }
+
+        for market, sel, price, is_opening, is_closing, ts in rows:
+            key = f"odds_closing_1x2_{_clean_sel(sel)}"
+            if odds_dict.get(key) is None and price is not None:
+                odds_dict[key] = float(price)
+
         return odds_dict
 
     # ------------------------------------------------------------------
@@ -265,12 +583,12 @@ class FeatureBuilder:
     # Volatility (entropy)
     # ------------------------------------------------------------------
 
-    def _volatility(self, odds: dict) -> dict[str, Any]:
+    def _volatility(self, features: dict) -> dict[str, Any]:
         import math
 
-        p_home = odds.get("implied_prob_home")
-        p_draw = odds.get("implied_prob_draw")
-        p_away = odds.get("implied_prob_away")
+        p_home = features.get("implied_prob_home")
+        p_draw = features.get("implied_prob_draw")
+        p_away = features.get("implied_prob_away")
 
         if not p_home or not p_draw or not p_away:
             return {"volatility_entropy": None}
@@ -311,23 +629,87 @@ class FeatureBuilder:
     # ------------------------------------------------------------------
 
     def _weather(self, match_canonical_id: str):
-        # (unchanged)
-        return weather_dict
+        row = self.con.execute(
+            """
+            SELECT *
+            FROM weather_records
+            WHERE match_canonical_id = ?
+            ORDER BY ingested_at DESC
+            LIMIT 1
+            """,
+            [match_canonical_id],
+        ).fetchone()
+
+        if row is None:
+            return {
+                "weather_temp_c": None,
+                "weather_wind_speed": None,
+                "weather_precip_mm": None,
+            }
+
+        cols = [c[0] for c in self.con.execute("DESCRIBE weather_records").fetchall()]
+        d = dict(zip(cols, row))
+
+        out = {}
+        for k, v in d.items():
+            if k in ("match_canonical_id",):
+                continue
+            out[f"weather_{k}"] = v
+        return out
 
     # ------------------------------------------------------------------
     # Context
     # ------------------------------------------------------------------
 
     def _context(self, home_id: str, away_id: str, kickoff: datetime, match: dict):
-        # (unchanged)
-        return context_dict
+        """
+        Simple contextual features: rest days, season, competition.
+        """
+        def last_match(team_id: str):
+            row = self.con.execute(
+                """
+                SELECT kickoff_utc
+                FROM matches
+                WHERE status = 'finished'
+                  AND kickoff_utc < ?
+                  AND (home_team_canonical_id = ? OR away_team_canonical_id = ?)
+                ORDER BY kickoff_utc DESC
+                LIMIT 1
+                """,
+                [kickoff, team_id, team_id],
+            ).fetchone()
+            return row[0] if row else None
+
+        home_last = last_match(home_id)
+        away_last = last_match(away_id)
+
+        home_rest = (kickoff - home_last).days if home_last else None
+        away_rest = (kickoff - away_last).days if away_last else None
+
+        return {
+            "home_rest_days": home_rest,
+            "away_rest_days": away_rest,
+        }
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _get_match(self, match_canonical_id: str):
-        # (unchanged)
+    def _get_match(self, match_canonical_id: str) -> dict | None:
+        row = self.con.execute(
+            """
+            SELECT *
+            FROM matches
+            WHERE canonical_id = ?
+            """,
+            [match_canonical_id],
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        cols = [c[0] for c in self.con.execute("DESCRIBE matches").fetchall()]
+        match_dict = dict(zip(cols, row))
         return match_dict
 
 
@@ -347,7 +729,7 @@ def _prefix(d: dict, prefix: str) -> dict:
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     builder = FeatureBuilder(store)
 
     seasons = store.conn.execute("""

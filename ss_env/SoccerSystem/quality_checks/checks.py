@@ -29,8 +29,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Callable, Optional
 
-from data_normalization.schemas import QualityCheckResult
-from data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.data_normalization.schemas import QualityCheckResult
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
 
 logger = logging.getLogger(__name__)
 

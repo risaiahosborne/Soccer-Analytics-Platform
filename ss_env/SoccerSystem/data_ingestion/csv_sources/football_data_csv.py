@@ -65,10 +65,10 @@ from typing import Any
 import requests
 import pandas as pd
 
-from data_ingestion.base import Ingestor, IngestionResult
-from data_normalization.schemas import OddsSnapshot, XGRecord, Match, Team
-from data_storage.duckdb_store import DuckDBStore
-from entity_resolution.id_mapper import EntityResolver, normalize_name
+from ss_env.SoccerSystem.data_ingestion.base import Ingestor, IngestionResult
+from ss_env.SoccerSystem.data_normalization.schemas import OddsSnapshot, XGRecord, Match, Team
+from ss_env.SoccerSystem.data_storage.duckdb_store import DuckDBStore
+from ss_env.SoccerSystem.entity_resolution.id_mapper import EntityResolver, normalize_name
 
 logger = logging.getLogger(__name__)
 
@@ -167,67 +167,57 @@ class FootballDataCsvIngestor(Ingestor):
     # TRANSFORM
     # ----------------------------------------------------------
     def transform(self, raw: pd.DataFrame):
+        teams = []
+        matches = []
         snapshots = []
         xg_records = []
-        out = []  # NEW: includes Team + Match models
 
         for _, row in raw.iterrows():
             kickoff_utc = _parse_kickoff(row)
             if kickoff_utc is None:
                 continue
 
-            home_name = TEAM_NAME_MAP.get(str(row.get("HomeTeam", "")).strip(), None)
-            away_name = TEAM_NAME_MAP.get(str(row.get("AwayTeam", "")).strip(), None)
-            if not home_name or not away_name:
-                continue
+            # Normalize short CSV team names → full canonical names
+            home_name = TEAM_NAME_MAP.get(row["HomeTeam"], row["HomeTeam"])
+            away_name = TEAM_NAME_MAP.get(row["AwayTeam"], row["AwayTeam"])
 
-            # ----------------------------------------------------------
-            # Resolve teams
-            # ----------------------------------------------------------
+            # Build source_ids
+            home_source_id = f"{self.season_start_year}_{home_name}"
+            away_source_id = f"{self.season_start_year}_{away_name}"
+
+            # Resolve canonical IDs (correct API)
             home_res = self.resolver.resolve_team(
-                source=self.source_name,
-                source_id=f"fdcsv_{normalize_name(home_name)}",
+                source="football-data.co.uk",
+                source_id=home_source_id,
                 name=home_name,
-                country="England",
-                league="Premier League",
             )
             away_res = self.resolver.resolve_team(
-                source=self.source_name,
-                source_id=f"fdcsv_{normalize_name(away_name)}",
+                source="football-data.co.uk",
+                source_id=away_source_id,
                 name=away_name,
-                country="England",
-                league="Premier League",
             )
 
-            # ----------------------------------------------------------
-            # NEW: Enriched Team metadata (Option A)
-            # ----------------------------------------------------------
+            # Extract canonical_id strings
+            home_canonical = home_res.canonical_id
+            away_canonical = away_res.canonical_id
+
+            # Build Team models using ONLY valid schema fields
             home_team = Team(
-                canonical_id=home_res.canonical_id,
-                display_name=home_name,
-                short_name=make_short_name(home_name),
-                normalized_name=normalize_name(home_name),
-                country="England",
-                league="Premier League",
-                team_code=make_team_code(home_name),
-                stadium=None,
-                city=None,
+                canonical_id=home_canonical,
+                source="football-data.co.uk",
+                source_id=home_source_id,
+                name=home_name,
             )
 
             away_team = Team(
-                canonical_id=away_res.canonical_id,
-                display_name=away_name,
-                short_name=make_short_name(away_name),
-                normalized_name=normalize_name(away_name),
-                country="England",
-                league="Premier League",
-                team_code=make_team_code(away_name),
-                stadium=None,
-                city=None,
+                canonical_id=away_canonical,
+                source="football-data.co.uk",
+                source_id=away_source_id,
+                name=away_name,
             )
 
-            out.append(home_team)
-            out.append(away_team)
+            teams.append(home_team)
+            teams.append(away_team)
 
             # ----------------------------------------------------------
             # Match creation
@@ -251,10 +241,10 @@ class FootballDataCsvIngestor(Ingestor):
                 season=f"{self.season_start_year}/{self.season_start_year+1}",
                 kickoff_utc=kickoff_utc,
                 status="finished",
-                home_team_source_id=f"fdcsv_{normalize_name(home_name)}",
-                away_team_source_id=f"fdcsv_{normalize_name(away_name)}",
-                home_team_canonical_id=home_res.canonical_id,
-                away_team_canonical_id=away_res.canonical_id,
+                home_team_source_id=home_source_id,
+                away_team_source_id=away_source_id,
+                home_team_canonical_id=home_canonical,
+                away_team_canonical_id=away_canonical,
                 home_score=_safe_int(row.get("FTHG")),
                 away_score=_safe_int(row.get("FTAG")),
                 venue_name=None,
@@ -263,7 +253,7 @@ class FootballDataCsvIngestor(Ingestor):
                 ingested_at=datetime.utcnow(),
             )
 
-            out.append(match)
+            matches.append(match)
 
             # ----------------------------------------------------------
             # Odds snapshots
@@ -276,7 +266,7 @@ class FootballDataCsvIngestor(Ingestor):
             xg_records.append(XGRecord(
                 source=self.source_name,
                 match_canonical_id=match_canonical_id,
-                team_canonical_id=home_res.canonical_id,
+                team_canonical_id=home_canonical,
                 xg=None, npxg=None, xga=None,
                 shots=_safe_int(row.get("HS")),
                 shots_on_target=_safe_int(row.get("HST")),
@@ -286,14 +276,14 @@ class FootballDataCsvIngestor(Ingestor):
             xg_records.append(XGRecord(
                 source=self.source_name,
                 match_canonical_id=match_canonical_id,
-                team_canonical_id=away_res.canonical_id,
+                team_canonical_id=away_canonical,
                 xg=None, npxg=None, xga=None,
                 shots=_safe_int(row.get("AS")),
                 shots_on_target=_safe_int(row.get("AST")),
                 possession_pct=None,
             ))
 
-        return out, snapshots, xg_records
+        return teams, matches, snapshots, xg_records
 
     # ----------------------------------------------------------
     # RUN
@@ -302,21 +292,37 @@ class FootballDataCsvIngestor(Ingestor):
         try:
             raw = self.fetch()
         except Exception as exc:
-            return IngestionResult(self.source_name, 0, 0, [f"fetch() failed: {exc}"])
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=[f"fetch() failed: {exc}"],
+            )
 
         if not self.validate_raw(raw):
-            return IngestionResult(self.source_name, 0, 0, ["validate_raw() failed"])
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=["validate_raw() failed"],
+            )
 
         try:
-            teams_and_matches, snapshots, xg_records = self.transform(raw)
+            teams, matches, snapshots, xg_records = self.transform(raw)
         except Exception as exc:
-            return IngestionResult(self.source_name, 0, 0, [f"transform() failed: {exc}"])
+            return IngestionResult(
+                source=self.source_name,
+                records_fetched=0,
+                records_stored=0,
+                errors=[f"transform() failed: {exc}"],
+            )
 
-        stored = 0
         errors = []
+        stored = 0
 
         try:
-            stored += self.store.upsert_models(teams_and_matches)
+            stored += self.store.upsert_models(teams)
+            stored += self.store.upsert_models(matches)
             stored += self.store.upsert_models(snapshots)
             stored += self.store.upsert_models(xg_records)
         except Exception as exc:
@@ -328,7 +334,6 @@ class FootballDataCsvIngestor(Ingestor):
             records_stored=stored,
             errors=errors,
         )
-
 
 # ----------------------------------------------------------
 # HELPERS
@@ -427,7 +432,7 @@ if __name__ == "__main__":
     import logging
     logging.basicConfig(level=logging.INFO)
 
-    store = DuckDBStore("data/soccer_smoketest.duckdb")
+    store = DuckDBStore("ss_env/SoccerSystem/data/soccer_smoketest.duckdb")
     resolver = EntityResolver(store)
 
     ingestor = FootballDataCsvIngestor(
