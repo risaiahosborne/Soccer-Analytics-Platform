@@ -13,9 +13,13 @@ class FutureFixturesIngestor:
         kickoff_utc: datetime,
         home_team_id: str,
         away_team_id: str,
-        venue: str | None = None,
-        referee: str | None = None,
-        round: int | None = None,
+        odds_home: float,
+        odds_draw: float,
+        odds_away: float,
+        odds_btts_yes: float,
+        odds_btts_no: float,
+        odds_over25: float,
+        odds_under25: float,
     ):
         self.con.execute(
             """
@@ -26,12 +30,15 @@ class FutureFixturesIngestor:
                 kickoff_utc,
                 home_team_canonical_id,
                 away_team_canonical_id,
-                venue,
-                referee,
-                round,
-                status
+                odds_home,
+                odds_draw,
+                odds_away,
+                odds_btts_yes,
+                odds_btts_no,
+                odds_over25,
+                odds_under25
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'scheduled')
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 fixture_id,
@@ -40,18 +47,20 @@ class FutureFixturesIngestor:
                 kickoff_utc,
                 home_team_id,
                 away_team_id,
-                venue,
-                referee,
-                round,
+                odds_home,
+                odds_draw,
+                odds_away,
+                odds_btts_yes,
+                odds_btts_no,
+                odds_over25,
+                odds_under25,
             ],
         )
-
     def get_upcoming_fixtures(self):
         return self.con.execute(
             """
             SELECT *
             FROM future_fixtures
-            WHERE status = 'scheduled'
             ORDER BY kickoff_utc
             """
         ).fetchdf()

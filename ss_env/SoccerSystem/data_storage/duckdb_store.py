@@ -170,6 +170,50 @@ CREATE TABLE IF NOT EXISTS quality_check_results (
     details         VARCHAR,
     run_at          TIMESTAMP NOT NULL,
 );
+
+CREATE TABLE IF NOT EXISTS future_fixtures (
+    fixture_id VARCHAR,
+    competition VARCHAR,
+    season VARCHAR,
+    kickoff_utc TIMESTAMP,
+    home_team_canonical_id VARCHAR,
+    away_team_canonical_id VARCHAR,
+    odds_home DOUBLE,
+    odds_draw DOUBLE,
+    odds_away DOUBLE,
+    odds_btts_yes DOUBLE,
+    odds_btts_no DOUBLE,
+    odds_over25 DOUBLE,
+    odds_under25 DOUBLE,
+    PRIMARY KEY (fixture_id)
+);
+
+CREATE TABLE IF NOT EXISTS predictions (
+    fixture_id VARCHAR,
+    home_team_name VARCHAR,
+    away_team_name VARCHAR,
+    competition VARCHAR,
+    kickoff_utc TIMESTAMP,
+
+    model_prob_home DOUBLE,
+    model_prob_draw DOUBLE,
+    model_prob_away DOUBLE,
+    model_prob_btts_yes DOUBLE,
+    model_prob_btts_no DOUBLE,
+    model_prob_over25 DOUBLE,
+    model_prob_under25 DOUBLE,
+
+    ev_home DOUBLE,
+    ev_draw DOUBLE,
+    ev_away DOUBLE,
+    ev_btts_yes DOUBLE,
+    ev_btts_no DOUBLE,
+    ev_over25 DOUBLE,
+    ev_under25 DOUBLE,
+
+    PRIMARY KEY (fixture_id)
+);
+
 """
 
 # Maps Pydantic model class name -> (table_name, conflict_key_columns)
